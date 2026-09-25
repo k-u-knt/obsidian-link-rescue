@@ -8,6 +8,9 @@ An [Obsidian](https://obsidian.md) plugin for two annoyances in iCloud-synced va
    silently when it shows them. Link Rescue shows their state and lets you choose automatic or manual
    downloads.
 
+**Desktop only for now.** Link repair works on any desktop platform; the iCloud features are macOS only.
+iPhone/iPad support is in progress.
+
 ## Why links break
 
 macOS names screenshots with an invisible **narrow no-break space** (U+202F) before `AM`/`PM`:
