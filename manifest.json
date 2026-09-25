@@ -1,0 +1,10 @@
+{
+	"id": "link-rescue",
+	"name": "Link Rescue",
+	"version": "0.1.0",
+	"minAppVersion": "1.5.0",
+	"description": "Repairs links that show \"could not be found\" or \"not created yet\" only because they contain an invisible or lookalike character, such as the narrow no-break space in macOS screenshot names. Shows iCloud download state on macOS.",
+	"author": "Kenta Ninomiya",
+	"authorUrl": "https://github.com/k-u-knt",
+	"isDesktopOnly": false
+}

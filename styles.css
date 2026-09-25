@@ -1,0 +1,166 @@
+.link-rescue-host {
+	position: relative;
+}
+
+.link-rescue-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	margin-inline-start: 4px;
+	border-radius: 50%;
+	background: var(--background-primary);
+	color: var(--icon-color);
+	box-shadow: var(--shadow-s);
+	cursor: pointer;
+	vertical-align: middle;
+	transition: opacity 0.3s ease;
+}
+
+.link-rescue-host > .link-rescue-badge {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	margin: 0;
+	z-index: 2;
+}
+
+.link-rescue-badge svg {
+	width: 14px;
+	height: 14px;
+}
+
+.link-rescue-badge:hover {
+	color: var(--icon-color-hover);
+	background: var(--background-modifier-hover);
+}
+
+.link-rescue-badge.is-repair,
+.link-rescue-badge.is-repair-cloud,
+.link-rescue-badge.is-cloud,
+.link-rescue-badge.is-downloading {
+	color: var(--interactive-accent);
+}
+
+.link-rescue-badge.is-done {
+	color: var(--color-green);
+}
+
+.link-rescue-badge.is-missing,
+.link-rescue-badge.is-ambiguous {
+	color: var(--text-muted);
+}
+
+.link-rescue-badge.is-failed {
+	color: var(--text-error);
+}
+
+.link-rescue-badge.is-downloading svg {
+	animation: link-rescue-spin 1s linear infinite;
+}
+
+@keyframes link-rescue-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.link-rescue-scan {
+	max-height: 50vh;
+	overflow-y: auto;
+	margin-bottom: var(--size-4-3);
+}
+
+.link-rescue-scan-note {
+	margin-bottom: var(--size-4-2);
+}
+
+.link-rescue-scan-source {
+	font-weight: var(--font-semibold);
+}
+
+.link-rescue-scan-row {
+	padding-inline-start: var(--size-4-4);
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	overflow-wrap: anywhere;
+}
+
+.link-rescue-scan-arrow {
+	color: var(--text-faint);
+}
+
+.link-rescue-scan-note-text {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.link-rescue-cloud-embed {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-3);
+	padding: var(--size-4-3) var(--size-4-4);
+	border: 1px dashed var(--background-modifier-border-hover);
+	border-radius: var(--radius-m);
+	background: var(--background-primary-alt);
+	color: var(--text-muted);
+	cursor: pointer;
+	max-width: 100%;
+}
+
+.link-rescue-cloud-embed:hover {
+	background: var(--background-modifier-hover);
+}
+
+.link-rescue-cloud-embed.is-downloading {
+	cursor: progress;
+}
+
+.link-rescue-cloud-icon {
+	display: flex;
+	color: var(--interactive-accent);
+}
+
+.link-rescue-cloud-embed.is-failed .link-rescue-cloud-icon {
+	color: var(--text-error);
+}
+
+.link-rescue-cloud-embed.is-downloading .link-rescue-cloud-icon svg,
+.link-rescue-status-icon svg {
+	animation: link-rescue-spin 1s linear infinite;
+}
+
+.link-rescue-cloud-name {
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	overflow-wrap: anywhere;
+}
+
+.link-rescue-cloud-status {
+	font-size: var(--font-ui-smaller);
+}
+
+.link-rescue-status {
+	display: inline-flex;
+	align-items: center;
+}
+
+.link-rescue-status-icon {
+	display: inline-flex;
+}
+
+.link-rescue-status-icon svg {
+	width: 12px;
+	height: 12px;
+}
+
+/* While a file is still in the cloud: hide the (src-less) image Obsidian's controls attach to. */
+.link-rescue-cloud-pending > img,
+.link-rescue-cloud-pending > .image-wrapper {
+	display: none;
+}
+
+.link-rescue-cloud-embed.is-retired {
+	cursor: default;
+}
