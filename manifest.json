@@ -1,7 +1,7 @@
 {
 	"id": "link-rescue",
 	"name": "Link Rescue",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"minAppVersion": "1.6.6",
 	"description": "Repairs links that don't resolve only because of an invisible or lookalike character, such as the narrow no-break space in macOS screenshot names, and shows the iCloud download state of embedded files on macOS.",
 	"author": "Kenta Ninomiya",
