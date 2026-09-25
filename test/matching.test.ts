@@ -113,3 +113,11 @@ test("isClickToCreateStub: empty note named after an attachment", () => {
 	assert.ok(!isClickToCreateStub("Notes/Meeting.md", 0));
 	assert.ok(!isClickToCreateStub("Notes/figure.png", 0));
 });
+
+test("NameIndex.remove", () => {
+	const idx = new NameIndex(["a/x.png", "b/x.png"]);
+	idx.remove("a/x.png");
+	assert.deepEqual(idx.find("x.png"), ["b/x.png"]);
+	idx.remove("b/x.png");
+	assert.deepEqual(idx.find("x.png"), []);
+});

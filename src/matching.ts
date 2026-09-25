@@ -66,6 +66,15 @@ export class NameIndex {
 		else if (!list.includes(path)) list.push(path);
 	}
 
+	remove(path: string): void {
+		const key = normalizeKey(basename(path));
+		const list = this.byName.get(key);
+		if (!list) return;
+		const rest = list.filter((p) => p !== path);
+		if (rest.length) this.byName.set(key, rest);
+		else this.byName.delete(key);
+	}
+
 	/** Files a link (without `#subpath`) would resolve to if lookalike characters were ignored. */
 	find(linkpath: string): string[] {
 		const link = normalizeKey(linkpath.replace(/^\/+/, ""));
