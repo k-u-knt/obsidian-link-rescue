@@ -72,7 +72,12 @@ export class NameIndex {
 	 * the whole path.
 	 */
 	find(linkpath: string, sourcePath = ""): string[] {
-		const exact = absoluteLinkpath(linkpath, sourcePath);
+		let exact = absoluteLinkpath(linkpath, sourcePath);
+		if (exact !== null) {
+			// Obsidian strips one leading "/" of a vault-absolute link; a second one means no match at all.
+			if (linkpath.startsWith("/") && exact.startsWith("/")) return [];
+			exact = exact.replace(/^\/+/, "");
+		}
 		const link = normalizeKey(exact ?? linkpath);
 		if (!link) return [];
 		const name = basename(link);
@@ -85,8 +90,6 @@ export class NameIndex {
 		}
 		if (!hits?.length) return [];
 		if (exact !== null) {
-			// Obsidian strips one leading "/"; a second one means no match at all.
-			if (exact.startsWith("/")) return [];
 			const exactHits = hits.filter((p) => normalizeKey(p) === fullLink);
 			// Vault-absolute links must match exactly; relative ones fall back to a suffix match, like Obsidian.
 			if (exactHits.length || linkpath.startsWith("/")) return exactHits;

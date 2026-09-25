@@ -154,3 +154,10 @@ test("replaceLinkTarget drops one trailing backslash like Obsidian's parser", ()
 	assert.equal(replaceLinkTarget("![[a\u202Fb.png\\]]", "a\u202Fb.png", "a b.png"), "![[a b.png\\]]");
 	assert.equal(replaceLinkTarget("[[my\u202Fnote#Head\\|x]]", "my\u202Fnote", "my note"), "[[my note#Head\\|x]]");
 });
+
+test("relative './/' links at the vault root still resolve; '//' vault-absolute links don't", () => {
+	const idx = new NameIndex(["Shot.png"]);
+	assert.deepEqual(idx.find(".//Shot.png", "n.md"), ["Shot.png"]);
+	assert.deepEqual(idx.find("//Shot.png", "n.md"), []);
+	assert.deepEqual(idx.find("/Shot.png", "n.md"), ["Shot.png"]);
+});

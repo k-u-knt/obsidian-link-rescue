@@ -84,6 +84,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	private timers = new Set<number>();
 	private datalessCache = new Map<string, { value: boolean; at: number }>();
 	private placeholders = new Set<CloudPlaceholder>();
+	private owners = new WeakMap<CloudPlaceholder, () => Array<{ el: HTMLElement }>>();
 	private reportedNotes = new Set<string>();
 	private downloads = new Map<string, Promise<void>>();
 	private downloaded = { count: 0, bytes: 0 };
@@ -333,6 +334,9 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 	track(p: CloudPlaceholder) {
 		this.placeholders.add(p);
+		// Remember its reading view while it's still in one (reading view renders sections before embeds load).
+		this.readingViewOf(p);
+		window.setTimeout(() => this.readingViewOf(p), 0);
 	}
 
 	untrack(p: CloudPlaceholder) {
@@ -345,25 +349,34 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	}
 
 	/**
-	 * Whether a placeholder belongs to something still shown or kept for showing. Reading view keeps off-screen
-	 * sections detached (alive), but also keeps embeds of notes the tab has moved away from (dead) until the tab
-	 * closes; Live Preview keeps scrolled-away widgets detached (alive). Dead ones are retired.
+	 * Whether a placeholder still belongs to something shown (or kept for showing). Obsidian detaches embeds it
+	 * keeps alive in many places (off-screen reading-view sections, scrolled-away Live Preview widgets, panned-away
+	 * canvas nodes, popovers) and tells us when it really unloads one. The one case it doesn't: reading view keeps
+	 * the embeds of a note after the tab has moved on to another note. So a placeholder is dead only with that
+	 * positive evidence: it was in a reading view whose sections no longer contain it.
 	 */
 	private isAlive(p: CloudPlaceholder): boolean {
-		const el = p.containerEl;
-		if (el.isConnected) return true;
-		let root: HTMLElement = el;
-		while (root.parentElement) root = root.parentElement;
-		// A Live Preview widget's own element, detached by CodeMirror but cached for reuse.
-		if (root === el) return true;
-		// A reading-view section that the view still holds (the same check Obsidian uses for detached sections).
-		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-			const sections = (leaf.view as unknown as { previewMode?: { renderer?: { sections?: Array<{ el: HTMLElement }> } } })
-				.previewMode?.renderer?.sections;
-			if (sections?.some((s) => s.el === root)) return true;
-		}
+		const owner = this.readingViewOf(p);
+		if (p.containerEl.isConnected || !owner) return true;
+		if (owner().some((s) => s.el.contains(p.containerEl))) return true;
 		p.retire();
 		return false;
+	}
+
+	/** The reading view (its current sections) that holds this placeholder, remembered once found. */
+	private readingViewOf(p: CloudPlaceholder): (() => Array<{ el: HTMLElement }>) | undefined {
+		const known = this.owners.get(p);
+		if (known) return known;
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			const renderer = (leaf.view as unknown as { previewMode?: { renderer?: { sections?: Array<{ el: HTMLElement }> } } })
+				.previewMode?.renderer;
+			if (renderer?.sections?.some((s) => s.el?.contains(p.containerEl))) {
+				const sections = () => renderer.sections ?? [];
+				this.owners.set(p, sections);
+				return sections;
+			}
+		}
+		return undefined;
 	}
 
 	async setDownloadMode(mode: DownloadMode) {
@@ -576,7 +589,13 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		// Never point a link at an empty note that "Click to create" made.
 		const candidates = this.index.find(link, sourcePath).filter((c) => !this.isStub(c));
 		const target = pickCandidate(candidates, sourcePath);
-		if (target) return { kind: "relink", target };
+		if (target) {
+			// The rewritten link must resolve to that very file in Obsidian, or rewriting would change its meaning.
+			const rewritten = obsidianLinktext(rewriteLinkpath(link, target));
+			const dest = this.app.metadataCache.getFirstLinkpathDest(rewritten, sourcePath);
+			if (dest && dest.path === target) return { kind: "relink", target };
+			return { kind: "ambiguous", candidates };
+		}
 		return candidates.length ? { kind: "ambiguous", candidates } : { kind: "missing" };
 	}
 
