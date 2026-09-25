@@ -26,7 +26,7 @@ export class IosCloud {
 	failures = 0;
 
 	private paths = new Map<string, string>(); // real path → placeholder path
-	private scanning: Promise<void> | null = null;
+	private scanning: Promise<string[]> | null = null;
 	// Changes that arrive while a scan is walking, re-applied once it finishes.
 	private forgottenDuringScan = new Set<string>();
 	private foldersDuringScan = new Set<string>();
@@ -59,13 +59,17 @@ export class IosCloud {
 		return [...this.paths].map(([path, placeholder]) => ({ path, placeholder }));
 	}
 
-	/** Walk the whole vault (skipping hidden folders such as .obsidian, .trash, .git) for placeholders. */
-	scan(): Promise<void> {
-		if (!this.available) return Promise.resolve();
+	/**
+	 * Walk the whole vault (skipping hidden folders such as .obsidian, .trash, .git) for placeholders.
+	 * Resolves with the real paths whose placeholder disappeared since the previous scan.
+	 */
+	scan(): Promise<string[]> {
+		if (!this.available) return Promise.resolve([]);
 		if (this.scanning) return this.scanning;
 		this.forgottenDuringScan.clear();
 		this.foldersDuringScan.clear();
-		this.scanning = (async () => {
+		const previous = new Set(this.paths.keys());
+		const p: Promise<string[]> = (async () => {
 			const found = new Map<string, string>();
 			let failures = 0;
 			const walk = async (folder: string) => {
@@ -82,25 +86,34 @@ export class IosCloud {
 			await walk("");
 			this.paths = found;
 			this.failures = failures;
-			for (const p of this.forgottenDuringScan) this.paths.delete(p);
+			for (const real of this.forgottenDuringScan) this.paths.delete(real);
 			this.index = new NameIndex(this.paths.keys());
-			const folders = [...this.foldersDuringScan];
-			this.scanning = null;
-			for (const f of folders) await this.rescanFolder(f);
+			// Folders that changed while we walked: list them again (until nothing new came in).
+			while (this.foldersDuringScan.size) {
+				const folders = [...this.foldersDuringScan];
+				this.foldersDuringScan.clear();
+				for (const f of folders) await this.relist(f);
+			}
+			return [...previous].filter((real) => !this.paths.has(real));
 		})().finally(() => {
-			this.scanning = null;
+			if (this.scanning === p) this.scanning = null;
 			if (!this.scanned) {
 				this.scanned = true;
 				this.markReady();
 			}
 		});
-		return this.scanning;
+		this.scanning = p;
+		return p;
 	}
 
 	/** Re-list one folder (e.g. after a placeholder changed). Returns real paths whose placeholder disappeared. */
 	async rescanFolder(folder: string): Promise<string[]> {
 		if (!this.available || isHiddenPath(folder)) return [];
 		if (this.scanning) this.foldersDuringScan.add(folder);
+		return this.relist(folder);
+	}
+
+	private async relist(folder: string): Promise<string[]> {
 		const listed = await this.list(folder);
 		if (!listed) return [];
 		const before = new Set([...this.paths.keys()].filter((p) => dirname(p) === folder));

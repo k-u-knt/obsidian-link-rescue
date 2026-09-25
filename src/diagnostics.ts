@@ -33,8 +33,10 @@ export class DiagnosticsModal extends Modal {
 		this.contentEl.setText("Running checks… The report is saved as a note after each step.");
 		// Listen right away so nothing is missed and closing early always removes the listeners.
 		this.watchEvents();
-		this.log(`# Link Rescue diagnostics`, `Started ${new Date().toISOString()}`, "");
+		this.log(`# Link Rescue diagnostics`, `Started ${new Date().toString()}`, "");
 		this.environment();
+		await this.save();
+		if (this.closed) return;
 		await this.placeholders();
 		if (this.closed) return;
 		await this.save();
@@ -96,15 +98,19 @@ export class DiagnosticsModal extends Modal {
 		await this.ios.scan();
 		this.log(`- own walk: ${found.length} placeholder(s), ${failures} folder(s) couldn't be listed`,
 			`- plugin index: ${this.ios.size} file(s) only in iCloud, ${this.ios.failures} listing failure(s)`);
+		await this.save();
 
 		const folder = this.folder();
 		this.log(`- folder of the active note: \`${folder || "/"}\``);
-		const raw = await this.rawNames(folder);
+		const entries = await this.rawEntries(folder);
 		const inVault = new Set(this.app.vault.getFiles().filter((f) => dirname(f.path) === folder).map((f) => f.name));
-		if (raw) {
+		if (entries) {
+			const files = entries.filter((e) => e.type !== "directory");
+			const raw = files.map((e) => e.name);
 			const hidden = raw.filter((n) => PLACEHOLDER.test(n));
-			const unknown = raw.filter((n) => !n.startsWith(".") && !inVault.has(n.replace(/[  ]/g, " ").normalize("NFC")));
-			this.log(`  - native listing: ${raw.length} entries, ${hidden.length} placeholder(s), ${inVault.size} known to Obsidian`);
+			const unknown = raw.filter((n) => !n.startsWith(".") && !inVault.has(normalized(n)));
+			this.log(`  - native listing: ${entries.length} entries (${files.length} files), ${hidden.length} placeholder(s), ` +
+				`${inVault.size} files known to Obsidian`);
 			for (const n of hidden.slice(0, 20)) this.log(`    - \`${visible(n)}\``);
 			if (unknown.length) this.log(`  - on disk but unknown to Obsidian (dataless?): ${unknown.slice(0, 20).map((n) => `\`${visible(n)}\``).join(", ")}`);
 			this.probes = hidden.slice(0, 15).map((ph) => {
@@ -125,13 +131,13 @@ export class DiagnosticsModal extends Modal {
 		this.log("");
 	}
 
-	/** Names exactly as on disk (Obsidian normalizes U+202F/U+00A0 in the names it reports). */
-	private async rawNames(folder: string): Promise<string[] | null> {
-		const fs = this.adapter.fs as { readdir?: (p: string) => Promise<Array<{ name: string } | string>> } | undefined;
+	/** Entries exactly as on disk (Obsidian normalizes U+202F/U+00A0 in the names it reports). */
+	private async rawEntries(folder: string): Promise<Array<{ name: string; type?: string }> | null> {
+		const fs = this.adapter.fs as { readdir?: (p: string) => Promise<Array<{ name: string; type?: string } | string>> } | undefined;
 		if (typeof fs?.readdir !== "function") return null;
 		try {
 			const entries = await fs.readdir(this.fullPath(folder));
-			return entries.map((e) => (typeof e === "string" ? e : e.name));
+			return entries.map((e) => (typeof e === "string" ? { name: e } : { name: e.name, type: e.type }));
 		} catch (e) {
 			this.log(`  - native readdir failed: \`${message(e)}\``);
 			return null;
@@ -166,7 +172,7 @@ export class DiagnosticsModal extends Modal {
 		for (const probe of this.probes) {
 			const s = new Setting(contentEl).setName(visible(probe.rawName)).setDesc(probe.real);
 			s.addButton((b) => b.setButtonText("Read").onClick(() => this.run(`readBinary("${visible(probe.real)}")`,
-				() => this.app.vault.adapter.readBinary(probe.real).then((buf) => `${buf.byteLength} bytes`), probe)));
+				() => withTimeout(this.app.vault.adapter.readBinary(probe.real).then((buf) => `${buf.byteLength} bytes`), 30000), probe)));
 			s.addButton((b) => b.setButtonText("verifyIcloud").onClick(() => this.verify(probe)));
 			s.addButton((b) => b.setButtonText("Rescan").onClick(() => this.rescan(probe)));
 		}
@@ -185,27 +191,36 @@ export class DiagnosticsModal extends Modal {
 		}));
 	}
 
-	/** Try verifyIcloud with each path form Obsidian's native plugin might expect. */
+	/** Try verifyIcloud with each path form Obsidian's native plugin might expect, stopping once one works. */
 	private async verify(probe: Probe) {
-		const full = this.fullPath(probe.real);
-		await this.run(`verifyIcloud({path: "${visible(full)}"})`, () => this.callVerify(full), probe);
 		const native = this.nativePath(probe.real);
-		if (native && !this.app.vault.getAbstractFileByPath(probe.real.replace(/[  ]/g, " ").normalize("NFC"))) {
-			await this.run(`verifyIcloud({path: "${visible(native)}"})`, () => this.callVerify(native), probe);
+		const forms = [this.fullPath(probe.real), native, native ? decodeURIComponent(native.replace(/^file:\/\//, "")) : null];
+		for (const form of forms) {
+			if (!form) continue;
+			if (!(await this.app.vault.adapter.exists(probe.placeholder).catch(() => true))) break;
+			await this.run(`verifyIcloud({path: "${visible(form)}"})`, () => this.callVerify(form), probe);
 		}
 	}
 
 	private callVerify(path: string): Promise<unknown> {
 		const fs = this.nativeFs;
-		if (!fs || typeof fs.verifyIcloud !== "function") return Promise.reject(new Error("verifyIcloud not available"));
+		const headers = (window as unknown as { Capacitor?: { PluginHeaders?: Array<{ name: string; methods: Array<{ name: string }> }> } })
+			.Capacitor?.PluginHeaders;
+		const listed = headers?.find((p) => p.name === "Filesystem")?.methods.some((m) => m.name === "verifyIcloud");
+		if (!fs || typeof fs.verifyIcloud !== "function" || listed === false) {
+			return Promise.reject(new Error("verifyIcloud not available on this device"));
+		}
 		return withTimeout((fs.verifyIcloud as (a: { path: string }) => Promise<unknown>).call(fs, { path }), 60000);
 	}
 
 	private async rescan(probe: Probe) {
 		await this.run(`rescan "${visible(probe.real)}"`, async () => {
 			await this.ios.rescanFolder(dirname(probe.real));
+			// Only ever give Obsidian its own normalized path: an on-disk name with U+202F would add a duplicate entry.
+			const norm = normalized(probe.real);
+			if (norm !== probe.real) return "name has characters Obsidian normalizes; only its own file watcher can pick it up";
 			const update = this.adapter.update as ((p: string) => Promise<void>) | undefined;
-			if (typeof update === "function") await update.call(this.app.vault.adapter, probe.real);
+			if (typeof update === "function" && !this.app.vault.getAbstractFileByPath(norm)) await update.call(this.app.vault.adapter, norm);
 			return "done";
 		}, probe);
 	}
@@ -227,11 +242,11 @@ export class DiagnosticsModal extends Modal {
 		new Notice(`Link Rescue: ${label}…`);
 		await this.attempt(label, fn);
 		if (probe) {
-			const normalized = probe.real.replace(/[  ]/g, " ").normalize("NFC");
+			const norm = normalized(probe.real);
 			const placeholderLeft = await this.app.vault.adapter.exists(probe.placeholder).catch(() => false);
 			const realExists = await this.app.vault.adapter.exists(probe.real).catch(() => false);
 			this.log(`  - after: placeholder still there ${placeholderLeft}, real file exists ${realExists}, ` +
-				`known to Obsidian ${!!this.app.vault.getAbstractFileByPath(normalized)}`);
+				`known to Obsidian ${!!this.app.vault.getAbstractFileByPath(norm)}`);
 		}
 		await this.save();
 		if (!this.closed) this.render();
@@ -263,8 +278,13 @@ export class DiagnosticsModal extends Modal {
 
 	/** Pick this run's report name: per device and time, never over another file or an iCloud placeholder. */
 	private async pickReportPath(): Promise<string> {
-		const device = Platform.isIosApp ? (Platform.isPhone ? "iPhone" : "iPad") : Platform.isMobile ? "mobile" : "desktop";
-		const stamp = new Date().toISOString().slice(0, 16).replace("T", " ").replace(":", ".");
+		const ua = navigator.userAgent;
+		// iPadOS reports a Mac user agent; touch points tell them apart. Window size (Platform.isPhone) doesn't.
+		const device = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
+			? "iPad" : Platform.isMobile ? "mobile" : "desktop";
+		const d = new Date();
+		const pad = (n: number) => String(n).padStart(2, "0");
+		const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}.${pad(d.getMinutes())}`;
 		for (let i = 0; ; i++) {
 			const name = `Link Rescue diagnostics (${device} ${stamp}${i ? ` ${i + 1}` : ""}).md`;
 			const taken = this.app.vault.getAbstractFileByPath(name)
@@ -292,13 +312,18 @@ export class DiagnosticsModal extends Modal {
 	}
 }
 
+/** Obsidian's own path normalization (U+00A0/U+202F become spaces, NFC). */
+function normalized(path: string): string {
+	return path.replace(/[\u00A0\u202F]/g, " ").normalize("NFC");
+}
+
 function join(folder: string, name: string): string {
 	return folder ? `${folder}/${name}` : name;
 }
 
 /** Show invisible characters so the report makes name differences visible. */
 function visible(s: string): string {
-	return s.replace(/[   -‍  ⁠　﻿]/g,
+	return s.replace(/[\u00A0\u1680\u2000-\u200D\u202F\u205F\u2060\u3000\uFEFF]/g,
 		(c) => `⟨U+${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}⟩`);
 }
 

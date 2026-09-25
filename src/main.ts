@@ -174,7 +174,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file || file.extension !== "md") return false;
-				if (!checking) this.repairNote(file, { reportNone: true });
+				if (!checking) this.iosCloud.ready.then(() => this.repairNote(file, { reportNone: true }));
 				return true;
 			},
 		});
@@ -230,31 +230,33 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		this.register(around(WorkspaceLeaf.prototype as unknown as { openLinkText: OpenLinkText }, {
 			openLinkText(next: OpenLinkText): OpenLinkText {
 				return function (this: WorkspaceLeaf, linktext: string, sourcePath: string, ...rest: unknown[]) {
-					if (plugin.unloaded || !plugin.settings.safeOpen || typeof linktext !== "string") {
+					const ios = plugin.iosCloud.available;
+					if (plugin.unloaded || typeof linktext !== "string" || (!plugin.settings.safeOpen && !ios)) {
 						return next.call(this, linktext, sourcePath, ...rest);
 					}
 					const { path, subpath } = splitSubpath(linktext);
 					const source = sourcePath ?? "";
 					const decide = (res: Resolution): Promise<void> => {
-						if (res.kind === "relink") {
-							plugin.repairSources(path, [sourcePath], { quiet: false });
-							return next.call(this, res.target + subpath, sourcePath, ...rest);
-						}
-						if (res.kind === "ambiguous") {
-							new Notice(`Link Rescue: not creating "${path}" because several files match:\n${res.candidates.join("\n")}`);
-							return Promise.resolve();
-						}
+						// The iCloud guard is always on; the lookalike handling follows the setting.
 						if (res.kind === "cloud") {
 							// Opening would create an empty file with the same name as the one waiting in iCloud.
 							new Notice(cloudMessage(res.target), 10000);
 							return Promise.resolve();
 						}
+						if (plugin.settings.safeOpen && res.kind === "relink") {
+							plugin.repairSources(path, [sourcePath], { quiet: false });
+							return next.call(this, res.target + subpath, sourcePath, ...rest);
+						}
+						if (plugin.settings.safeOpen && res.kind === "ambiguous") {
+							new Notice(`Link Rescue: not creating "${path}" because several files match:\n${res.candidates.join("\n")}`);
+							return Promise.resolve();
+						}
 						return next.call(this, linktext, sourcePath, ...rest);
 					};
 					const res = plugin.resolve(path, source);
-					// iPhone/iPad: before Obsidian creates a note for a "missing" link, make sure it isn't just not
-					// downloaded here (the placeholder index may still be loading or may have missed a change).
-					if (res.kind !== "missing" || !plugin.iosCloud.available) return decide(res);
+					if (res.kind === "ok" || !ios) return decide(res);
+					// iPhone/iPad: until we know which files are only in iCloud, and before Obsidian creates a note for a
+					// "missing" link, make sure the file isn't just not downloaded here.
 					return (async () => {
 						if (!plugin.iosCloud.scanned) {
 							const ready = await Promise.race([plugin.iosCloud.ready.then(() => true), sleep(5000).then(() => false)]);
@@ -264,9 +266,12 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 							}
 						}
 						const again = plugin.resolve(path, source);
-						if (again.kind === "missing" && await plugin.placeholderWhereCreated(path, source)) {
-							new Notice(cloudMessage(obsidianLinktext(path)), 10000);
-							return;
+						if (again.kind === "missing") {
+							const cloudPath = await plugin.placeholderWhereCreated(path, source);
+							if (cloudPath) {
+								new Notice(cloudMessage(cloudPath), 10000);
+								return;
+							}
 						}
 						return decide(again);
 					})();
@@ -423,8 +428,8 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		new Notice(`Link Rescue: downloaded ${count} file${count === 1 ? "" : "s"} from ${this.cloudName} (${formatSize(bytes)}).`);
 	}, 1500, true);
 
-	/** Is there an iCloud placeholder where Obsidian would create the file for this link? (iPhone/iPad) */
-	async placeholderWhereCreated(linkpath: string, sourcePath: string): Promise<boolean> {
+	/** The real path of an iCloud placeholder where Obsidian would create the file for this link, if any. */
+	async placeholderWhereCreated(linkpath: string, sourcePath: string): Promise<string | null> {
 		const link = obsidianLinktext(linkpath);
 		const name = basename(link);
 		const names = name.includes(".") ? [name, `${name}.md`] : [`${name}.md`];
@@ -436,10 +441,20 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		for (const n of names) {
 			if (await this.iosCloud.hasPlaceholder(folder, n)) {
 				this.iosCloud.rescanFolder(folder).then(() => this.redecorate());
-				return true;
+				return folder ? `${folder}/${n}` : n;
 			}
 		}
-		return false;
+		return null;
+	}
+
+	/** Placeholders vanished (downloaded): if Obsidian didn't notice the real file, ask it to look again. */
+	private async nudge(gone: string[]) {
+		const update = (this.app.vault.adapter as unknown as { update?: (p: string) => Promise<void> }).update;
+		if (typeof update !== "function") return;
+		for (const real of gone) {
+			// Only Obsidian-normalized paths: passing an on-disk name with U+202F would create a duplicate entry.
+			if (!this.app.vault.getAbstractFileByPath(real)) await update.call(this.app.vault.adapter, real).catch(() => undefined);
+		}
 	}
 
 	/** iPhone/iPad: keep the placeholder index current so "not downloaded here" isn't mistaken for "missing". */
@@ -455,16 +470,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		const flush = debounce(async () => {
 			const folders = [...pending];
 			pending.clear();
-			for (const folder of folders) {
-				const gone = await this.iosCloud.rescanFolder(folder);
-				// A placeholder vanished but Obsidian didn't notice the downloaded file: ask it to look again.
-				const update = (this.app.vault.adapter as unknown as { update?: (p: string) => Promise<void> }).update;
-				for (const real of gone) {
-					if (!this.app.vault.getAbstractFileByPath(real) && typeof update === "function") {
-						await update.call(this.app.vault.adapter, real).catch(() => undefined);
-					}
-				}
-			}
+			for (const folder of folders) await this.nudge(await this.iosCloud.rescanFolder(folder));
 			this.redecorate();
 		}, 500, true);
 		const vault = this.app.vault as unknown as { on(name: "raw", cb: (path: string) => void): import("obsidian").EventRef };
@@ -481,9 +487,13 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 				hiddenAt = Date.now();
 				return;
 			}
-			if (Date.now() - hiddenAt < 5000 && Date.now() - lastScan < 60000) return;
+			// Ignore quick app switches and back-to-back returns; a trip to the Files app takes longer.
+			if (Date.now() - hiddenAt < 5000 || Date.now() - lastScan < 15000) return;
 			lastScan = Date.now();
-			this.iosCloud.scan().then(() => this.redecorate());
+			this.iosCloud.scan().then(async (gone) => {
+				await this.nudge(gone);
+				this.redecorate();
+			});
 		});
 	}
 
@@ -514,7 +524,12 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		if (!link || this.app.metadataCache.getFirstLinkpathDest(link, sourcePath)) return { kind: "ok" };
 		// iPhone/iPad: not downloaded on this device isn't broken; never "repair" or create over it.
 		if (this.iosCloud.available) {
-			const cloud = this.iosCloud.index.find(link);
+			// Drop stale entries for files that have arrived since.
+			const cloud = this.iosCloud.index.find(link).filter((p) => {
+				if (!this.app.vault.getAbstractFileByPath(p)) return true;
+				this.iosCloud.forget(p);
+				return false;
+			});
 			if (cloud.length) return { kind: "cloud", target: pickCandidate(cloud, sourcePath) ?? cloud[0] };
 		}
 		// Never point a link at an empty note that "Click to create" made.
@@ -661,6 +676,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 				return;
 			case "missing":
 				if (el.matches(".internal-embed")) this.setBadge(el, "missing", "No matching file in this vault.");
+				else this.badgeOf(el)?.remove();
 		}
 	}
 
@@ -757,7 +773,9 @@ class ScanModal extends Modal {
 
 	onOpen() {
 		this.setTitle("Link Rescue");
-		this.render();
+		if (this.plugin.iosCloud.scanned) return this.render();
+		this.contentEl.setText("Checking which files are only in iCloud…");
+		this.plugin.iosCloud.ready.then(() => { if (this.contentEl.isConnected) this.render(); });
 	}
 
 	private render() {
