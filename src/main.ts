@@ -1,11 +1,14 @@
 import {
-	App, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, debounce, setIcon, setTooltip,
+	App, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, debounce, setIcon,
+	setTooltip,
 } from "obsidian";
 import { around } from "monkey-around";
 import { CloudEmbed, CloudHost, CloudPlaceholder, EmbedCreator, formatSize, gateMediaEmbed } from "./cloudEmbed";
+import { DiagnosticsModal } from "./diagnostics";
 import { ICloud } from "./icloud";
+import { IosCloud } from "./icloudIos";
 import {
-	LinkEdit, NameIndex, applyEdits, basename, isClickToCreateStub, normalizeKey, obsidianLinktext, pickCandidate,
+	LinkEdit, NameIndex, applyEdits, basename, dirname, isClickToCreateStub, normalizeKey, obsidianLinktext, pickCandidate,
 	rewriteLinkpath, splitSubpath,
 } from "./matching";
 
@@ -66,6 +69,8 @@ type Resolution =
 	| { kind: "ok" }
 	/** Exactly one file matches once lookalike characters are ignored; rewrite the link to its name. */
 	| { kind: "relink"; target: string }
+	/** iOS/iPadOS: the file exists in iCloud but isn't downloaded to this device (only a placeholder). */
+	| { kind: "cloud"; target: string }
 	| { kind: "ambiguous"; candidates: string[] }
 	| { kind: "missing" };
 
@@ -73,6 +78,8 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	settings: LinkRescueSettings = DEFAULT_SETTINGS;
 	index = new NameIndex();
 	icloud!: ICloud;
+	iosCloud!: IosCloud;
+	private brokenIndex: Map<string, string[]> | null = null;
 	private unloaded = false;
 	private timers = new Set<number>();
 	private datalessCache = new Map<string, { value: boolean; at: number }>();
@@ -85,6 +92,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	async onload() {
 		await this.loadSettings();
 		this.icloud = new ICloud(this.app);
+		this.iosCloud = new IosCloud(this.app);
 		this.addSettingTab(new LinkRescueSettingTab(this.app, this));
 		this.patchOpenLinkText();
 		// Before layout-ready, so the embeds of the first notes shown go through it too.
@@ -108,8 +116,35 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			}));
 			this.autoRepair(this.app.workspace.getActiveFile());
 			this.observeDom();
+			// Lookup of which notes contain which broken links; rebuilt when links change.
+			const invalidate = () => { this.brokenIndex = null; };
+			this.registerEvent(this.app.metadataCache.on("resolved", invalidate));
+			this.registerEvent(this.app.metadataCache.on("changed", invalidate));
+			this.setupIosCloud();
 		});
 
+		this.addCommand({
+			id: "icloud-diagnostics",
+			name: "iCloud diagnostics (iPhone/iPad test)",
+			checkCallback: (checking) => {
+				if (!Platform.isMobileApp) return false;
+				if (!checking) new DiagnosticsModal(this.app, this.iosCloud).open();
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "rescan-icloud-placeholders",
+			name: "Rescan files not downloaded from iCloud (iPhone/iPad)",
+			checkCallback: (checking) => {
+				if (!this.iosCloud.available) return false;
+				if (!checking) this.iosCloud.scan().then(() => {
+					new Notice(`Link Rescue: ${this.iosCloud.size} file${this.iosCloud.size === 1 ? " is" : "s are"} ` +
+						"in iCloud but not downloaded on this device.");
+					this.redecorate();
+				});
+				return true;
+			},
+		});
 		this.addCommand({
 			id: "download-note-icloud-files",
 			name: "Download cloud files embedded in current note",
@@ -203,6 +238,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 					}
 					if (res.kind === "ambiguous") {
 						new Notice(`Link Rescue: not creating "${path}" because several files match:\n${res.candidates.join("\n")}`);
+						return Promise.resolve();
+					}
+					if (res.kind === "cloud") {
+						// Opening would create an empty file with the same name as the one waiting in iCloud.
+						new Notice(cloudMessage(res.target), 10000);
 						return Promise.resolve();
 					}
 					return next.call(this, linktext, sourcePath, ...rest);
@@ -359,6 +399,35 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		new Notice(`Link Rescue: downloaded ${count} file${count === 1 ? "" : "s"} from ${this.cloudName} (${formatSize(bytes)}).`);
 	}, 1500, true);
 
+	/** iPhone/iPad: index iCloud placeholders so "not downloaded here" isn't mistaken for "missing". */
+	private setupIosCloud() {
+		if (!this.iosCloud.available) return;
+		this.iosCloud.scan().then(() => this.redecorate());
+		this.registerEvent(this.app.vault.on("create", (f) => {
+			if (this.iosCloud.has(f.path)) {
+				this.iosCloud.forget(f.path);
+				this.redecorate();
+			}
+		}));
+		// Undocumented, but fired by the adapter for every path it sees, including hidden ones.
+		const vault = this.app.vault as unknown as { on(name: "raw", cb: (path: string) => void): import("obsidian").EventRef };
+		const rescan = debounce((folder: string) => this.iosCloud.rescanFolder(folder).then(() => this.redecorate()), 500, true);
+		this.registerEvent(vault.on("raw", (path: string) => {
+			if (typeof path === "string" && path.endsWith(".icloud")) rescan(dirname(path));
+		}));
+		// Coming back from the Files app (where the user may have downloaded files).
+		const rescanAll = debounce(() => this.iosCloud.scan().then(() => this.redecorate()), 1000, true);
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState === "visible") rescanAll();
+		});
+	}
+
+	/** Re-evaluate every broken link/embed on screen (e.g. after the placeholder index changed). */
+	private redecorate() {
+		document.querySelectorAll<HTMLElement>("[data-link-rescue]").forEach((el) => delete el.dataset.linkRescue);
+		this.decorate();
+	}
+
 	private autoRepair(file: TFile | null) {
 		if (file && file.extension === "md" && this.settings.autoRepair) this.repairNote(file, {});
 	}
@@ -367,6 +436,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	resolve(linkpath: string, sourcePath: string): Resolution {
 		const link = obsidianLinktext(linkpath);
 		if (!link || this.app.metadataCache.getFirstLinkpathDest(link, sourcePath)) return { kind: "ok" };
+		// iPhone/iPad: not downloaded on this device isn't broken; never "repair" or create over it.
+		if (this.iosCloud.available) {
+			const cloud = this.iosCloud.index.find(link);
+			if (cloud.length) return { kind: "cloud", target: pickCandidate(cloud, sourcePath) ?? cloud[0] };
+		}
 		// Never point a link at an empty note that "Click to create" made.
 		const candidates = this.index.find(link).filter((c) => !this.isStub(c));
 		const target = pickCandidate(candidates, sourcePath);
@@ -443,12 +517,19 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 	/** Notes whose unresolved links include `linkpath` (compared ignoring lookalike characters). */
 	notesWithBrokenLink(linkpath: string): string[] {
-		const key = normalizeKey(splitSubpath(linkpath).path);
-		const out: string[] = [];
-		for (const [source, links] of Object.entries(this.app.metadataCache.unresolvedLinks)) {
-			if (Object.keys(links).some((l) => normalizeKey(l) === key)) out.push(source);
+		if (!this.brokenIndex) {
+			const index = new Map<string, string[]>();
+			for (const [source, links] of Object.entries(this.app.metadataCache.unresolvedLinks)) {
+				for (const l of Object.keys(links)) {
+					const k = normalizeKey(l);
+					const list = index.get(k);
+					if (!list) index.set(k, [source]);
+					else if (!list.includes(source)) list.push(source);
+				}
+			}
+			this.brokenIndex = index;
 		}
-		return out;
+		return [...(this.brokenIndex.get(normalizeKey(splitSubpath(linkpath).path)) ?? [])];
 	}
 
 	async isDataless(path: string): Promise<boolean> {
@@ -469,8 +550,8 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			window.requestAnimationFrame(() => { scheduled = false; if (!this.unloaded) this.decorate(); });
 		};
 		const observer = new MutationObserver(schedule);
-		// document.body rather than the workspace, so hover popovers are covered too.
-		observer.observe(document.body, { childList: true, subtree: true });
+		// document.body rather than the workspace, so hover popovers are covered too (not on phones: cheaper).
+		observer.observe(Platform.isMobile ? this.app.workspace.containerEl : document.body, { childList: true, subtree: true });
 		this.register(() => observer.disconnect());
 		schedule();
 	}
@@ -494,6 +575,9 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 					`Found "${res.target}"${cloud ? " (in iCloud)" : ""}. Its name differs from this link only by an ` +
 					`invisible character. Click to fix the link.`,
 					() => this.fixElement(el, path, source)));
+				return;
+			case "cloud":
+				this.setBadge(el, "repair-cloud", cloudMessage(res.target), () => new Notice(cloudMessage(res.target), 10000));
 				return;
 			case "ambiguous":
 				this.setBadge(el, "ambiguous", `Several files match:\n${res.candidates.join("\n")}\nRename or move one so the link is unambiguous.`);
@@ -540,7 +624,8 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			b.addEventListener("auxclick", onBadge);
 			badge = b;
 		}
-		badge._linkRescueClick = onClick;
+		// Touch screens don't show tooltips, so a tap shows the explanation instead.
+		badge._linkRescueClick = onClick ?? (Platform.isMobile ? () => new Notice(tooltip, 8000) : undefined);
 		badge.className = `link-rescue-badge is-${state}${onClick ? " is-clickable" : ""}`;
 		badge.empty();
 		setIcon(badge, BADGE_ICONS[state]);
@@ -576,6 +661,14 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 type BadgeEl = HTMLElement & { _linkRescueClick?: () => void };
 
+/** What to tell the user about a file that's in iCloud but not downloaded on this iPhone/iPad. */
+function cloudMessage(path: string): string {
+	const device = Platform.isTablet ? "iPad" : "iPhone";
+	return `"${basename(path)}" is in iCloud but not downloaded on this ${device}. To get it, open the Files app → ` +
+		`iCloud Drive → Obsidian → your vault${dirname(path) ? ` → ${dirname(path)}` : ""} and tap the file, then come back. ` +
+		`Tip: long-press the vault folder in Files and choose "Keep Downloaded".`;
+}
+
 /** Link text of a rendered link/embed element (the raw link path; Obsidian doesn't URL-encode it). */
 function linkOf(el: HTMLElement): string | null {
 	return el.getAttribute("src") ?? el.getAttribute("data-href");
@@ -598,6 +691,7 @@ class ScanModal extends Modal {
 
 		const relinks = new Map<string, Array<{ linkpath: string; target: string }>>();
 		let ambiguous = 0;
+		let cloud = 0;
 		for (const [source, links] of Object.entries(metadataCache.unresolvedLinks)) {
 			for (const linkpath of Object.keys(links)) {
 				const res = this.plugin.resolve(linkpath, source);
@@ -605,6 +699,7 @@ class ScanModal extends Modal {
 					if (!relinks.has(source)) relinks.set(source, []);
 					relinks.get(source)!.push({ linkpath, target: res.target });
 				} else if (res.kind === "ambiguous") ambiguous++;
+				else if (res.kind === "cloud") cloud++;
 			}
 		}
 		const total = [...relinks.values()].reduce((n, l) => n + l.length, 0);
@@ -648,6 +743,13 @@ class ScanModal extends Modal {
 			},
 		);
 
+		if (cloud) {
+			contentEl.createEl("p", {
+				cls: "link-rescue-scan-note-text",
+				text: `${cloud} link${cloud === 1 ? " points" : "s point"} to files that are in iCloud but not downloaded on ` +
+					"this device. They are left alone.",
+			});
+		}
 		if (ambiguous) {
 			contentEl.createEl("p", {
 				cls: "link-rescue-scan-note-text",

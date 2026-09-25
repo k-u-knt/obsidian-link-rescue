@@ -31,9 +31,11 @@
 	height: 14px;
 }
 
-.link-rescue-badge:hover {
-	color: var(--icon-color-hover);
-	background: var(--background-modifier-hover);
+@media (hover: hover) {
+	.link-rescue-badge:hover {
+		color: var(--icon-color-hover);
+		background: var(--background-modifier-hover);
+	}
 }
 
 .link-rescue-badge.is-repair,
@@ -109,8 +111,10 @@
 	max-width: 100%;
 }
 
-.link-rescue-cloud-embed:hover {
-	background: var(--background-modifier-hover);
+@media (hover: hover) {
+	.link-rescue-cloud-embed:hover {
+		background: var(--background-modifier-hover);
+	}
 }
 
 .link-rescue-cloud-embed.is-downloading {
@@ -163,4 +167,10 @@
 
 .link-rescue-cloud-embed.is-retired {
 	cursor: default;
+}
+
+/* Touch screens: a comfortable tap target. */
+.is-mobile .link-rescue-badge {
+	width: var(--touch-size-xs, 30px);
+	height: var(--touch-size-xs, 30px);
 }

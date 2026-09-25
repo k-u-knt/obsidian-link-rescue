@@ -18,7 +18,7 @@ export class ICloud {
 	constructor(private app: App) {}
 
 	get available(): boolean {
-		return Platform.isDesktopApp && Platform.isMacOS && this.app.vault.adapter instanceof FileSystemAdapter;
+		return Platform.isDesktopApp && !Platform.isMobile && Platform.isMacOS && this.app.vault.adapter instanceof FileSystemAdapter;
 	}
 
 	/** "iCloud" for vaults in iCloud Drive; other File Provider services (Dropbox, OneDrive…) use the same flag. */
@@ -67,6 +67,7 @@ export class ICloud {
 
 	/** Ask iCloud to download the file by reading its first byte; resolves once the read returns. */
 	download(vaultPath: string): Promise<void> {
+		if (!this.available) return Promise.reject(new Error("iCloud downloads are only supported on macOS"));
 		const existing = this.inFlight.get(vaultPath);
 		if (existing) return existing;
 		const p = this.schedule(async () => {
