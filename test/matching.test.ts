@@ -128,22 +128,29 @@ test("relative (./, ../) and vault-absolute (/) links match only the exact path"
 	assert.equal(absoluteLinkpath("./x.png", "Vault/Notes/n.md"), "Vault/Notes/x.png");
 	assert.equal(absoluteLinkpath("./../x.png", "Vault/Notes/n.md"), "Vault/x.png");
 	assert.equal(absoluteLinkpath("/Vault/x.png", "Vault/Notes/n.md"), "Vault/x.png");
+	assert.deepEqual(new NameIndex([vaultPath]).find("//Vault/Attachments/" + brokenLink, "n.md"), []);
 	assert.equal(absoluteLinkpath("x.png", "Vault/Notes/n.md"), null);
 	const idx = new NameIndex([vaultPath, "Other/Attachments/Screenshot 2025-03-14 at 9.41.07 AM.png"]);
 	assert.deepEqual(idx.find("../Attachments/" + brokenLink, "Vault/Notes/n.md"), [vaultPath]);
 	assert.deepEqual(idx.find("/Vault/Attachments/" + brokenLink, "Vault/Notes/n.md"), [vaultPath]);
-	assert.deepEqual(idx.find("./" + brokenLink, "Vault/Notes/n.md"), []);
+	// Relative links that don't match exactly fall back to Obsidian's suffix match.
+	assert.deepEqual(new NameIndex([vaultPath]).find("../Attachments/" + brokenLink, "n.md"), [vaultPath]);
 });
 
 test("rewriteLinkpath keeps relative prefixes and dotted note names", () => {
 	assert.equal(rewriteLinkpath("../Attachments/" + brokenLink, vaultPath), "../Attachments/Screenshot 2025-03-14 at 9.41.07 AM.png");
 	assert.equal(rewriteLinkpath("./" + brokenLink, vaultPath), "./Screenshot 2025-03-14 at 9.41.07 AM.png");
 	assert.equal(rewriteLinkpath("/Vault/Attachments/" + brokenLink, vaultPath), "/Vault/Attachments/Screenshot 2025-03-14 at 9.41.07 AM.png");
-	assert.equal(rewriteLinkpath("Plan v1.2", "Notes/Plan v1.2.md"), "Plan v1.2");
-	assert.equal(rewriteLinkpath("Plan v1.2.md", "Notes/Plan v1.2.md"), "Plan v1.2.md");
+	assert.equal(rewriteLinkpath("Plan\u202Fv1.2", "Notes/Plan v1.2.md"), "Plan v1.2");
+	assert.equal(rewriteLinkpath("Plan\u202Fv1.2.md", "Notes/Plan v1.2.md"), "Plan v1.2.md");
 });
 
 test("replaceLinkTarget handles the escaped pipe used inside tables", () => {
-	assert.equal(replaceLinkTarget("![[a b.png\\|300]]", "a b.png", "a b.png"), "![[a b.png\\|300]]");
-	assert.equal(replaceLinkTarget("[[my note\\|Alias]]", "my note", "my note"), "[[my note\\|Alias]]");
+	assert.equal(replaceLinkTarget("![[a\u202Fb.png\\|300]]", "a\u202Fb.png", "a b.png"), "![[a b.png\\|300]]");
+	assert.equal(replaceLinkTarget("[[my\u202Fnote\\|Alias]]", "my\u202Fnote", "my note"), "[[my note\\|Alias]]");
+});
+
+test("replaceLinkTarget drops one trailing backslash like Obsidian's parser", () => {
+	assert.equal(replaceLinkTarget("![[a\u202Fb.png\\]]", "a\u202Fb.png", "a b.png"), "![[a b.png\\]]");
+	assert.equal(replaceLinkTarget("[[my\u202Fnote#Head\\|x]]", "my\u202Fnote", "my note"), "[[my note#Head\\|x]]");
 });

@@ -84,7 +84,13 @@ export class NameIndex {
 			hits = this.byName.get(`${name}.md`);
 		}
 		if (!hits?.length) return [];
-		if (exact !== null) return hits.filter((p) => normalizeKey(p) === fullLink);
+		if (exact !== null) {
+			// Obsidian strips one leading "/"; a second one means no match at all.
+			if (exact.startsWith("/")) return [];
+			const exactHits = hits.filter((p) => normalizeKey(p) === fullLink);
+			// Vault-absolute links must match exactly; relative ones fall back to a suffix match, like Obsidian.
+			if (exactHits.length || linkpath.startsWith("/")) return exactHits;
+		}
 		if (!link.includes("/")) return [...hits];
 		// Links with folders must match the end of the file's path at a folder boundary.
 		return hits.filter((p) => {
@@ -96,7 +102,7 @@ export class NameIndex {
 
 /** Vault path for relative (`./`, `../`) or vault-absolute (`/…`) links; null for ordinary links. */
 export function absoluteLinkpath(linkpath: string, sourcePath: string): string | null {
-	if (linkpath.startsWith("/")) return linkpath.replace(/^\/+/, "");
+	if (linkpath.startsWith("/")) return linkpath.slice(1);
 	if (!linkpath.startsWith("./") && !linkpath.startsWith("../")) return null;
 	let rel = linkpath.replace(/^\.\/(?=\.\.\/)/, "");
 	let folder = dirname(sourcePath);
@@ -178,17 +184,22 @@ export function applyEdits(text: string, edits: LinkEdit[]): { text: string; app
  * when it matches `oldPath` up to lookalike characters. Returns null when it doesn't.
  */
 export function replaceLinkTarget(original: string, oldPath: string, newPath: string): string | null {
-	const wiki = /^(!?\[\[)([^\]|#]*)/.exec(original);
+	const wiki = /^(!?\[\[)([^\]|]*)/.exec(original);
 	if (wiki) {
+		// Like Obsidian's parser: the target is the text before "|" (or "]]"), minus one trailing backslash
+		// (tables escape the alias separator as "\|"), and the path is the part before "#".
 		const start = wiki[1].length;
-		const end = start + wiki[2].length;
-		// In tables the alias separator is escaped: [[target\|alias]]. The backslash isn't part of the target.
-		const escapedPipe = wiki[2].endsWith("\\") && original[end] === "|";
-		const raw = escapedPipe ? wiki[2].slice(0, -1) : wiki[2];
+		const region = wiki[2];
+		let pathEnd = region.indexOf("#");
+		if (pathEnd === -1) {
+			const trimmed = region.replace(/\s+$/, "");
+			pathEnd = trimmed.endsWith("\\") ? trimmed.length - 1 : region.length;
+		}
+		const raw = region.slice(0, pathEnd);
 		if (normalizeKey(raw) !== normalizeKey(oldPath)) return null;
 		const lead = raw.match(/^\s*/)![0];
 		const trail = raw.match(/\s*$/)![0];
-		return original.slice(0, start) + lead + newPath + trail + (escapedPipe ? "\\" : "") + original.slice(end);
+		return original.slice(0, start) + lead + newPath + trail + original.slice(start + raw.length);
 	}
 	// Markdown link: the destination follows the last "](" (link text may itself contain brackets).
 	const open = original.lastIndexOf("](");

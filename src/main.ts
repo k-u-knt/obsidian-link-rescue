@@ -250,8 +250,6 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 						}
 						if (plugin.settings.safeOpen && res.kind === "ambiguous") {
 							new Notice(`Link Rescue: not creating "${path}" because several files match:\n${res.candidates.join("\n")}`);
-							// Don't leave behind the empty tab Obsidian opened for Cmd-click / "open in new tab".
-							if (this.view?.getViewType() === "empty") this.detach();
 							return Promise.resolve();
 						}
 						if (plugin.settings.safeOpen && res.kind === "ok") {
@@ -341,12 +339,31 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		this.placeholders.delete(p);
 	}
 
-	/**
-	 * Placeholders still waiting for their file. Detached ones are kept: reading view keeps off-screen sections
-	 * detached but alive. They leave the set when Obsidian unloads their embed (retire) or they're revealed.
-	 */
+	/** Placeholders still waiting for their file, in notes that are still open (stale ones are retired). */
 	private pendingPlaceholders(): CloudPlaceholder[] {
-		return [...this.placeholders].filter((p) => p.pending);
+		return [...this.placeholders].filter((p) => p.pending && this.isAlive(p));
+	}
+
+	/**
+	 * Whether a placeholder belongs to something still shown or kept for showing. Reading view keeps off-screen
+	 * sections detached (alive), but also keeps embeds of notes the tab has moved away from (dead) until the tab
+	 * closes; Live Preview keeps scrolled-away widgets detached (alive). Dead ones are retired.
+	 */
+	private isAlive(p: CloudPlaceholder): boolean {
+		const el = p.containerEl;
+		if (el.isConnected) return true;
+		let root: HTMLElement = el;
+		while (root.parentElement) root = root.parentElement;
+		// A Live Preview widget's own element, detached by CodeMirror but cached for reuse.
+		if (root === el) return true;
+		// A reading-view section that the view still holds (the same check Obsidian uses for detached sections).
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			const sections = (leaf.view as unknown as { previewMode?: { renderer?: { sections?: Array<{ el: HTMLElement }> } } })
+				.previewMode?.renderer?.sections;
+			if (sections?.some((s) => s.el === root)) return true;
+		}
+		p.retire();
+		return false;
 	}
 
 	async setDownloadMode(mode: DownloadMode) {
@@ -392,7 +409,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			this.downloaded.count++;
 			this.downloaded.bytes += file.stat.size;
 			this.notifyDownloaded();
-			for (const p of [...this.placeholders]) if (p.file === file) p.finish();
+			for (const p of [...this.placeholders]) if (p.file === file && this.isAlive(p)) p.finish();
 		})().finally(() => {
 			this.downloads.delete(file.path);
 			this.updateStatus();
@@ -818,14 +835,22 @@ class ScanModal extends Modal {
 		let ambiguous = 0;
 		let cloud = 0;
 		for (const [source, links] of Object.entries(metadataCache.unresolvedLinks)) {
-			const file = vault.getAbstractFileByPath(source);
-			// Only links the repair can actually edit: body links and embeds of markdown notes.
-			const editable = file instanceof TFile && file.extension === "md"
-				? new Set(this.plugin.planRepairs(file).map((e) => linkKey(e.oldLinkpath)))
-				: new Set<string>();
-			for (const linkpath of Object.keys(links)) {
+			const linkpaths = Object.keys(links);
+			if (!linkpaths.length) continue;
+			// Only links the repair can actually edit: body links and embeds of markdown notes (computed on demand).
+			let editable: Set<string> | null = null;
+			const canEdit = (linkpath: string) => {
+				if (!editable) {
+					const file = vault.getAbstractFileByPath(source);
+					editable = file instanceof TFile && file.extension === "md"
+						? new Set(this.plugin.planRepairs(file).map((e) => linkKey(e.oldLinkpath)))
+						: new Set<string>();
+				}
+				return editable.has(linkKey(linkpath));
+			};
+			for (const linkpath of linkpaths) {
 				const res = this.plugin.resolve(linkpath, source);
-				if (res.kind === "relink" && editable.has(linkKey(linkpath))) {
+				if (res.kind === "relink" && canEdit(linkpath)) {
 					if (!relinks.has(source)) relinks.set(source, []);
 					relinks.get(source)!.push({ linkpath, target: res.target });
 				} else if (res.kind === "ambiguous") ambiguous++;
@@ -869,8 +894,17 @@ class ScanModal extends Modal {
 			stubs.map((f) => ({ text: f.path })),
 			stubs.length ? `Delete ${stubs.length} empty note${stubs.length === 1 ? "" : "s"}` : null,
 			async () => {
-				for (const f of stubs) await this.app.fileManager.trashFile(f);
-				new Notice(`Link Rescue: deleted ${stubs.length} empty note${stubs.length === 1 ? "" : "s"}.`);
+				let deleted = 0;
+				for (const f of stubs) {
+					// Re-check right before deleting: the note may have gained content since the list was drawn.
+					if (vault.getAbstractFileByPath(f.path) !== f || !isClickToCreateStub(f.path, f.stat.size)) continue;
+					if ((await vault.read(f)).length) continue;
+					await this.app.fileManager.trashFile(f);
+					deleted++;
+				}
+				const skipped = stubs.length - deleted;
+				new Notice(`Link Rescue: deleted ${deleted} empty note${deleted === 1 ? "" : "s"}` +
+					`${skipped ? ` (${skipped} skipped because they're no longer empty)` : ""}.`);
 			},
 		);
 

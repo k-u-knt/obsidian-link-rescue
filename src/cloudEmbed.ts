@@ -153,8 +153,16 @@ export function gateMediaEmbed(host: CloudHost, ctx: EmbedContext, file: TFile, 
 		const placeholder = new CloudPlaceholder(host, el, file, async () => {
 			if (!img) return load();
 			await setSrc(img, resourcePath());
-			// Live Preview hid its zoom/edit buttons while the image had no size; re-check now that it has one.
-			if (el.hasClass("no-hover-actions")) window.requestAnimationFrame(() => el.toggleClass("no-hover-actions", img.offsetWidth < 80));
+			// Live Preview hid its zoom/edit buttons while the image had no size; re-check once it's laid out.
+			if (el.hasClass("no-hover-actions")) {
+				const observer = new ResizeObserver(() => {
+					if (!img.isConnected || img.offsetWidth === 0) return;
+					el.toggleClass("no-hover-actions", img.offsetWidth < 80);
+					observer.disconnect();
+				});
+				observer.observe(img);
+				real.register(() => observer.disconnect());
+			}
 		});
 		real.register(() => placeholder.retire());
 		return placeholder.begin();
