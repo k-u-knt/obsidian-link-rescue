@@ -74,9 +74,10 @@ export class NameIndex {
 	find(linkpath: string, sourcePath = ""): string[] {
 		let exact = absoluteLinkpath(linkpath, sourcePath);
 		if (exact !== null) {
-			// Obsidian strips one leading "/" of a vault-absolute link; a second one means no match at all.
-			if (linkpath.startsWith("/") && exact.startsWith("/")) return [];
-			exact = exact.replace(/^\/+/, "");
+			// Obsidian strips exactly one leading "/" (absoluteLinkpath already did for "/…" links); if another
+			// remains, nothing matches.
+			if (!linkpath.startsWith("/")) exact = exact.replace(/^\//, "");
+			if (exact.startsWith("/")) return [];
 		}
 		const link = normalizeKey(exact ?? linkpath);
 		if (!link) return [];
@@ -225,8 +226,8 @@ export function replaceLinkTarget(original: string, oldPath: string, newPath: st
 		// keep raw
 	}
 	if (normalizeKey(decoded) !== normalizeKey(oldPath)) return null;
-	// Inside <…> spaces are allowed as-is; otherwise encode them like Obsidian does.
-	const encoded = angle ? newPath : newPath.replace(/ /g, "%20");
+	// Inside <…> spaces are allowed as-is; otherwise encode "%" and spaces so the link decodes back to newPath.
+	const encoded = angle ? newPath : newPath.replace(/%/g, "%25").replace(/ /g, "%20");
 	return original.slice(0, bodyStart) + encoded + original.slice(pathEnd);
 }
 

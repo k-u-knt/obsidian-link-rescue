@@ -161,3 +161,13 @@ test("relative './/' links at the vault root still resolve; '//' vault-absolute 
 	assert.deepEqual(idx.find("//Shot.png", "n.md"), []);
 	assert.deepEqual(idx.find("/Shot.png", "n.md"), ["Shot.png"]);
 });
+
+test("markdown links: '%' in the new name is escaped so the link decodes back to it", () => {
+	const out = replaceLinkTarget("![x](100%25%E2%80%AFA.png)", "100%\u202FA.png", "100% A.png");
+	assert.equal(out, "![x](100%25%20A.png)");
+	assert.equal(decodeURI("100%25%20A.png"), "100% A.png");
+});
+
+test("only one leading slash is stripped, as Obsidian does", () => {
+	assert.deepEqual(new NameIndex(["p q.png", "ab/p q.png"]).find(".///p\u202Fq.png", "n.md"), []);
+});

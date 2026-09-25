@@ -367,11 +367,13 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	private readingViewOf(p: CloudPlaceholder): (() => Array<{ el: HTMLElement }>) | undefined {
 		const known = this.owners.get(p);
 		if (known) return known;
+		type Sections = Array<{ el: HTMLElement }>;
 		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-			const renderer = (leaf.view as unknown as { previewMode?: { renderer?: { sections?: Array<{ el: HTMLElement }> } } })
+			const renderer = (leaf.view as unknown as { previewMode?: { renderer?: { sections?: Sections; recycledSections?: Sections } } })
 				.previewMode?.renderer;
 			if (renderer?.sections?.some((s) => s.el?.contains(p.containerEl))) {
-				const sections = () => renderer.sections ?? [];
+				// Sections being re-rendered wait in recycledSections, and their embeds are moved into the new ones.
+				const sections = () => [...(renderer.sections ?? []), ...(renderer.recycledSections ?? [])];
 				this.owners.set(p, sections);
 				return sections;
 			}
@@ -594,7 +596,8 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			const rewritten = obsidianLinktext(rewriteLinkpath(link, target));
 			const dest = this.app.metadataCache.getFirstLinkpathDest(rewritten, sourcePath);
 			if (dest && dest.path === target) return { kind: "relink", target };
-			return { kind: "ambiguous", candidates };
+			// Name the file Obsidian would pick too, so the "several files match" advice can be followed.
+			return { kind: "ambiguous", candidates: dest ? [...new Set([...candidates, dest.path])] : candidates };
 		}
 		return candidates.length ? { kind: "ambiguous", candidates } : { kind: "missing" };
 	}
