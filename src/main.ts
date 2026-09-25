@@ -244,12 +244,24 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 							return Promise.resolve();
 						}
 						if (plugin.settings.safeOpen && res.kind === "relink") {
-							plugin.repairSources(path, [sourcePath], { quiet: false });
+							// Repair only the note the link was followed from (not every note, e.g. from the graph view).
+							if (sourcePath) plugin.repairSources(path, [sourcePath], { quiet: false, onlyHinted: true });
 							return next.call(this, res.target + subpath, sourcePath, ...rest);
 						}
 						if (plugin.settings.safeOpen && res.kind === "ambiguous") {
 							new Notice(`Link Rescue: not creating "${path}" because several files match:\n${res.candidates.join("\n")}`);
+							// Don't leave behind the empty tab Obsidian opened for Cmd-click / "open in new tab".
+							if (this.view?.getViewType() === "empty") this.detach();
 							return Promise.resolve();
+						}
+						if (plugin.settings.safeOpen && res.kind === "ok") {
+							// Obsidian's own check here uses the raw link text; if only the normalized form resolves
+							// (U+00A0, NFD), hand it the normalized form so it doesn't create an empty duplicate.
+							const normalizedPath = obsidianLinktext(path);
+							if (normalizedPath !== path && !plugin.app.metadataCache.getFirstLinkpathDest(path, source)
+								&& plugin.app.metadataCache.getFirstLinkpathDest(normalizedPath, source)) {
+								return next.call(this, normalizedPath + subpath, sourcePath, ...rest);
+							}
 						}
 						return next.call(this, linktext, sourcePath, ...rest);
 					};
@@ -329,9 +341,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		this.placeholders.delete(p);
 	}
 
-	/** Placeholders still waiting for their file (dropping ones whose embed left the page without unloading). */
+	/**
+	 * Placeholders still waiting for their file. Detached ones are kept: reading view keeps off-screen sections
+	 * detached but alive. They leave the set when Obsidian unloads their embed (retire) or they're revealed.
+	 */
 	private pendingPlaceholders(): CloudPlaceholder[] {
-		for (const p of this.placeholders) if (!p.containerEl.isConnected && !p.downloading) this.placeholders.delete(p);
 		return [...this.placeholders].filter((p) => p.pending);
 	}
 
@@ -497,6 +511,16 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		});
 	}
 
+	/** Apply the "Show status icons" setting to what's on screen now. */
+	refreshBadges() {
+		if (!this.settings.showBadges) {
+			document.querySelectorAll(".link-rescue-badge").forEach((b) => b.remove());
+			document.querySelectorAll(".link-rescue-host").forEach((el) => el.removeClass("link-rescue-host"));
+			return;
+		}
+		this.redecorate();
+	}
+
 	/** Re-evaluate every broken link/embed on screen (e.g. after the placeholder index changed). */
 	private redecorate() {
 		if (this.unloaded) return;
@@ -525,7 +549,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		// iPhone/iPad: not downloaded on this device isn't broken; never "repair" or create over it.
 		if (this.iosCloud.available) {
 			// Drop stale entries for files that have arrived since.
-			const cloud = this.iosCloud.index.find(link).filter((p) => {
+			const cloud = this.iosCloud.index.find(link, sourcePath).filter((p) => {
 				if (!this.app.vault.getAbstractFileByPath(p)) return true;
 				this.iosCloud.forget(p);
 				return false;
@@ -533,7 +557,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			if (cloud.length) return { kind: "cloud", target: pickCandidate(cloud, sourcePath) ?? cloud[0] };
 		}
 		// Never point a link at an empty note that "Click to create" made.
-		const candidates = this.index.find(link).filter((c) => !this.isStub(c));
+		const candidates = this.index.find(link, sourcePath).filter((c) => !this.isStub(c));
 		const target = pickCandidate(candidates, sourcePath);
 		if (target) return { kind: "relink", target };
 		return candidates.length ? { kind: "ambiguous", candidates } : { kind: "missing" };
@@ -548,11 +572,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	planRepairs(file: TFile, onlyLinkpath?: string): LinkEdit[] {
 		const cache = this.app.metadataCache.getFileCache(file);
 		if (!cache) return [];
-		const only = onlyLinkpath === undefined ? null : normalizeKey(onlyLinkpath);
+		const only = onlyLinkpath === undefined ? null : linkKey(onlyLinkpath);
 		const edits: LinkEdit[] = [];
 		for (const ref of [...(cache.links ?? []), ...(cache.embeds ?? [])]) {
 			const { path: linkpath } = splitSubpath(ref.link);
-			if (only !== null && normalizeKey(linkpath) !== only) continue;
+			if (only !== null && linkKey(linkpath) !== only) continue;
 			const res = this.resolve(linkpath, file.path);
 			if (res.kind !== "relink") continue;
 			const newLinkpath = rewriteLinkpath(linkpath, res.target);
@@ -595,11 +619,13 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	 * seen in; if none of them contains it (e.g. it was inside an embedded note or a hover popover), every
 	 * note with the same broken link is repaired.
 	 */
-	async repairSources(linkpath: string, hints: Array<string | null | undefined>, opts: { quiet?: boolean } = {}): Promise<number> {
+	async repairSources(
+		linkpath: string, hints: Array<string | null | undefined>, opts: { quiet?: boolean; onlyHinted?: boolean } = {},
+	): Promise<number> {
 		const sources = this.notesWithBrokenLink(linkpath);
 		const hinted = hints.filter((h): h is string => !!h && sources.includes(h));
 		let n = 0;
-		for (const source of hinted.length ? hinted.slice(0, 1) : sources) {
+		for (const source of hinted.length ? hinted.slice(0, 1) : opts.onlyHinted ? [] : sources) {
 			const file = this.app.vault.getAbstractFileByPath(source);
 			if (file instanceof TFile) n += await this.repairNote(file, { onlyLinkpath: linkpath, quiet: opts.quiet });
 		}
@@ -612,7 +638,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			const index = new Map<string, string[]>();
 			for (const [source, links] of Object.entries(this.app.metadataCache.unresolvedLinks)) {
 				for (const l of Object.keys(links)) {
-					const k = normalizeKey(l);
+					const k = linkKey(l);
 					const list = index.get(k);
 					if (!list) index.set(k, [source]);
 					else if (!list.includes(source)) list.push(source);
@@ -620,7 +646,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			}
 			this.brokenIndex = index;
 		}
-		return [...(this.brokenIndex.get(normalizeKey(splitSubpath(linkpath).path)) ?? [])];
+		return [...(this.brokenIndex.get(linkKey(splitSubpath(linkpath).path)) ?? [])];
 	}
 
 	async isDataless(path: string): Promise<boolean> {
@@ -754,6 +780,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 type BadgeEl = HTMLElement & { _linkRescueClick?: () => void };
 
+/** Compare links ignoring lookalike characters, case, and whether a note link spells out ".md". */
+function linkKey(linkpath: string): string {
+	return normalizeKey(linkpath).replace(/\.md$/, "");
+}
+
 /** What to tell the user about a file that's in iCloud but not downloaded on this iPhone/iPad. */
 function cloudMessage(path: string): string {
 	return `"${basename(path)}" is in iCloud but not downloaded on this device. To get it, open the Files app → ` +
@@ -787,9 +818,14 @@ class ScanModal extends Modal {
 		let ambiguous = 0;
 		let cloud = 0;
 		for (const [source, links] of Object.entries(metadataCache.unresolvedLinks)) {
+			const file = vault.getAbstractFileByPath(source);
+			// Only links the repair can actually edit: body links and embeds of markdown notes.
+			const editable = file instanceof TFile && file.extension === "md"
+				? new Set(this.plugin.planRepairs(file).map((e) => linkKey(e.oldLinkpath)))
+				: new Set<string>();
 			for (const linkpath of Object.keys(links)) {
 				const res = this.plugin.resolve(linkpath, source);
-				if (res.kind === "relink") {
+				if (res.kind === "relink" && editable.has(linkKey(linkpath))) {
 					if (!relinks.has(source)) relinks.set(source, []);
 					relinks.get(source)!.push({ linkpath, target: res.target });
 				} else if (res.kind === "ambiguous") ambiguous++;
@@ -828,12 +864,13 @@ class ScanModal extends Modal {
 
 		this.section(
 			`Empty notes made by "Click to create" (${stubs.length})`,
-			"Empty notes named after an attachment that exists elsewhere in the vault. They are moved to your system trash.",
+			"Empty notes named after an attachment that exists elsewhere in the vault. They are deleted the way " +
+				"your \"Deleted files\" setting says (system trash, Obsidian's .trash folder, or permanently).",
 			stubs.map((f) => ({ text: f.path })),
-			stubs.length ? `Move ${stubs.length} to system trash` : null,
+			stubs.length ? `Delete ${stubs.length} empty note${stubs.length === 1 ? "" : "s"}` : null,
 			async () => {
-				for (const f of stubs) await vault.trash(f, true);
-				new Notice(`Link Rescue: moved ${stubs.length} empty note${stubs.length === 1 ? "" : "s"} to the system trash.`);
+				for (const f of stubs) await this.app.fileManager.trashFile(f);
+				new Notice(`Link Rescue: deleted ${stubs.length} empty note${stubs.length === 1 ? "" : "s"}.`);
 			},
 		);
 
@@ -892,11 +929,12 @@ class LinkRescueSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 		type ToggleKey = { [K in keyof LinkRescueSettings]: LinkRescueSettings[K] extends boolean ? K : never }[keyof LinkRescueSettings];
-		const toggle = (key: ToggleKey, name: string, desc: string) =>
+		const toggle = (key: ToggleKey, name: string, desc: string, after?: () => void) =>
 			new Setting(containerEl).setName(name).setDesc(desc).addToggle((t) =>
 				t.setValue(this.plugin.settings[key]).onChange(async (v) => {
 					this.plugin.settings[key] = v;
 					await this.plugin.saveSettings();
+					after?.();
 				}),
 			);
 		toggle("autoRepair", "Repair links when a note opens",
@@ -929,6 +967,7 @@ class LinkRescueSettingTab extends PluginSettingTab {
 		if (this.plugin.icloud.available) toggle("notifyDownloads", "Notify about iCloud downloads",
 			"Show a message when files have been downloaded from iCloud.");
 		toggle("showBadges", "Show status icons",
-			"Show a small icon on broken links and embeds, and on files that are still in iCloud.");
+			"Show a small icon on broken links and embeds, and on files that are still in iCloud.",
+			() => this.plugin.refreshBadges());
 	}
 }

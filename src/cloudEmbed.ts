@@ -150,8 +150,12 @@ export function gateMediaEmbed(host: CloudHost, ctx: EmbedContext, file: TFile, 
 		// For images, create the <img> now, as Obsidian would but without a src: Live Preview looks it up right
 		// after loadFile() to attach its resize handle and context menu. It gets its src once downloaded.
 		const img = isImage ? createImg(el) : null;
-		const placeholder = new CloudPlaceholder(host, el, file,
-			async () => { if (img) await setSrc(img, resourcePath()); else await load(); });
+		const placeholder = new CloudPlaceholder(host, el, file, async () => {
+			if (!img) return load();
+			await setSrc(img, resourcePath());
+			// Live Preview hid its zoom/edit buttons while the image had no size; re-check now that it has one.
+			if (el.hasClass("no-hover-actions")) window.requestAnimationFrame(() => el.toggleClass("no-hover-actions", img.offsetWidth < 80));
+		});
 		real.register(() => placeholder.retire());
 		return placeholder.begin();
 	};

@@ -121,3 +121,29 @@ test("NameIndex.remove", () => {
 	idx.remove("b/x.png");
 	assert.deepEqual(idx.find("x.png"), []);
 });
+
+test("relative (./, ../) and vault-absolute (/) links match only the exact path", async () => {
+	const { absoluteLinkpath } = await import("../src/matching.ts");
+	assert.equal(absoluteLinkpath("../Attachments/x.png", "Vault/Notes/n.md"), "Vault/Attachments/x.png");
+	assert.equal(absoluteLinkpath("./x.png", "Vault/Notes/n.md"), "Vault/Notes/x.png");
+	assert.equal(absoluteLinkpath("./../x.png", "Vault/Notes/n.md"), "Vault/x.png");
+	assert.equal(absoluteLinkpath("/Vault/x.png", "Vault/Notes/n.md"), "Vault/x.png");
+	assert.equal(absoluteLinkpath("x.png", "Vault/Notes/n.md"), null);
+	const idx = new NameIndex([vaultPath, "Other/Attachments/Screenshot 2025-03-14 at 9.41.07 AM.png"]);
+	assert.deepEqual(idx.find("../Attachments/" + brokenLink, "Vault/Notes/n.md"), [vaultPath]);
+	assert.deepEqual(idx.find("/Vault/Attachments/" + brokenLink, "Vault/Notes/n.md"), [vaultPath]);
+	assert.deepEqual(idx.find("./" + brokenLink, "Vault/Notes/n.md"), []);
+});
+
+test("rewriteLinkpath keeps relative prefixes and dotted note names", () => {
+	assert.equal(rewriteLinkpath("../Attachments/" + brokenLink, vaultPath), "../Attachments/Screenshot 2025-03-14 at 9.41.07 AM.png");
+	assert.equal(rewriteLinkpath("./" + brokenLink, vaultPath), "./Screenshot 2025-03-14 at 9.41.07 AM.png");
+	assert.equal(rewriteLinkpath("/Vault/Attachments/" + brokenLink, vaultPath), "/Vault/Attachments/Screenshot 2025-03-14 at 9.41.07 AM.png");
+	assert.equal(rewriteLinkpath("Plan v1.2", "Notes/Plan v1.2.md"), "Plan v1.2");
+	assert.equal(rewriteLinkpath("Plan v1.2.md", "Notes/Plan v1.2.md"), "Plan v1.2.md");
+});
+
+test("replaceLinkTarget handles the escaped pipe used inside tables", () => {
+	assert.equal(replaceLinkTarget("![[a b.png\\|300]]", "a b.png", "a b.png"), "![[a b.png\\|300]]");
+	assert.equal(replaceLinkTarget("[[my note\\|Alias]]", "my note", "my note"), "[[my note\\|Alias]]");
+});

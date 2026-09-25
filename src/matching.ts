@@ -31,15 +31,6 @@ export function dirname(path: string): string {
 	return i === -1 ? "" : path.slice(0, i);
 }
 
-function stripExtension(name: string): string {
-	const i = name.lastIndexOf(".");
-	return i <= 0 ? name : name.slice(0, i);
-}
-
-function hasExtension(name: string): boolean {
-	return name.lastIndexOf(".") > 0;
-}
-
 /** Split a link like `Note#Heading` into its path and subpath (`#Heading`). */
 export function splitSubpath(link: string): { path: string; subpath: string } {
 	const i = link.indexOf("#");
@@ -75,9 +66,14 @@ export class NameIndex {
 		else this.byName.delete(key);
 	}
 
-	/** Files a link (without `#subpath`) would resolve to if lookalike characters were ignored. */
-	find(linkpath: string): string[] {
-		const link = normalizeKey(linkpath.replace(/^\/+/, ""));
+	/**
+	 * Files a link (without `#subpath`) would resolve to if lookalike characters were ignored. Like Obsidian,
+	 * `./` and `../` are relative to the linking note and a leading `/` means the vault root; both must match
+	 * the whole path.
+	 */
+	find(linkpath: string, sourcePath = ""): string[] {
+		const exact = absoluteLinkpath(linkpath, sourcePath);
+		const link = normalizeKey(exact ?? linkpath);
 		if (!link) return [];
 		const name = basename(link);
 		// Like Obsidian: an exact file name (with extension) first, then the name + ".md".
@@ -88,6 +84,7 @@ export class NameIndex {
 			hits = this.byName.get(`${name}.md`);
 		}
 		if (!hits?.length) return [];
+		if (exact !== null) return hits.filter((p) => normalizeKey(p) === fullLink);
 		if (!link.includes("/")) return [...hits];
 		// Links with folders must match the end of the file's path at a folder boundary.
 		return hits.filter((p) => {
@@ -95,6 +92,20 @@ export class NameIndex {
 			return path === fullLink || path.endsWith(`/${fullLink}`);
 		});
 	}
+}
+
+/** Vault path for relative (`./`, `../`) or vault-absolute (`/…`) links; null for ordinary links. */
+export function absoluteLinkpath(linkpath: string, sourcePath: string): string | null {
+	if (linkpath.startsWith("/")) return linkpath.replace(/^\/+/, "");
+	if (!linkpath.startsWith("./") && !linkpath.startsWith("../")) return null;
+	let rel = linkpath.replace(/^\.\/(?=\.\.\/)/, "");
+	let folder = dirname(sourcePath);
+	if (rel.startsWith("./")) rel = rel.slice(2);
+	while (rel.startsWith("../")) {
+		rel = rel.slice(3);
+		folder = dirname(folder);
+	}
+	return folder ? `${folder}/${rel}` : rel;
 }
 
 /**
@@ -110,14 +121,27 @@ export function pickCandidate(candidates: string[], sourcePath: string): string 
 
 /**
  * The link path to write so the link resolves to `targetPath`: the original link with its
- * lookalike-character differences removed, keeping its folder depth and whether it had an extension.
+ * lookalike-character differences removed. Keeps its form: `./`/`../` segments, a leading `/`, how many
+ * folders it names, and whether it spells out the extension.
  */
 export function rewriteLinkpath(linkpath: string, targetPath: string): string {
-	const keepExtension = hasExtension(basename(linkpath));
-	const depth = linkpath.replace(/^\/+/, "").split("/").length;
-	const replacement = targetPath.split("/").slice(-depth).join("/");
-	const prefix = linkpath.startsWith("/") ? "/" : "";
-	return prefix + (keepExtension ? replacement : stripExtension(replacement));
+	const segments = linkpath.split("/");
+	// Leading "", ".", ".." segments stay; the named segments are replaced by the target's last ones.
+	let keep = 0;
+	while (keep < segments.length - 1 && (segments[keep] === "" || segments[keep] === "." || segments[keep] === "..")) keep++;
+	const named = segments.length - keep;
+	let replacement = targetPath.split("/").slice(-named).join("/");
+	// Obsidian lets note links leave out ".md"; attachments always name their extension.
+	const linkName = normalizeKey(basename(linkpath));
+	const targetExt = extension(targetPath);
+	if (targetExt === "md" && !linkName.endsWith(".md")) replacement = replacement.slice(0, -3);
+	return [...segments.slice(0, keep), replacement].join("/");
+}
+
+function extension(path: string): string {
+	const name = basename(path);
+	const i = name.lastIndexOf(".");
+	return i <= 0 ? "" : name.slice(i + 1).toLowerCase();
 }
 
 export interface LinkEdit {
@@ -156,12 +180,15 @@ export function applyEdits(text: string, edits: LinkEdit[]): { text: string; app
 export function replaceLinkTarget(original: string, oldPath: string, newPath: string): string | null {
 	const wiki = /^(!?\[\[)([^\]|#]*)/.exec(original);
 	if (wiki) {
-		const raw = wiki[2];
+		const start = wiki[1].length;
+		const end = start + wiki[2].length;
+		// In tables the alias separator is escaped: [[target\|alias]]. The backslash isn't part of the target.
+		const escapedPipe = wiki[2].endsWith("\\") && original[end] === "|";
+		const raw = escapedPipe ? wiki[2].slice(0, -1) : wiki[2];
 		if (normalizeKey(raw) !== normalizeKey(oldPath)) return null;
 		const lead = raw.match(/^\s*/)![0];
 		const trail = raw.match(/\s*$/)![0];
-		const start = wiki[1].length;
-		return original.slice(0, start) + lead + newPath + trail + original.slice(start + raw.length);
+		return original.slice(0, start) + lead + newPath + trail + (escapedPipe ? "\\" : "") + original.slice(end);
 	}
 	// Markdown link: the destination follows the last "](" (link text may itself contain brackets).
 	const open = original.lastIndexOf("](");

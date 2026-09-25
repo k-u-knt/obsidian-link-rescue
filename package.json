@@ -1,7 +1,7 @@
 {
   "name": "obsidian-link-rescue",
   "version": "0.1.0",
-  "description": "Repair links that Obsidian reports as \"not created yet\" when the file exists under a slightly different name (invisible spaces, Unicode normalization), and show iCloud download state.",
+  "description": "Repairs links that don't resolve only because of an invisible or lookalike character, such as the narrow no-break space in macOS screenshot names, and shows the iCloud download state of embedded files on macOS.",
   "type": "module",
   "main": "main.js",
   "scripts": {

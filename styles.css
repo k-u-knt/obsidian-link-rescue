@@ -161,8 +161,9 @@
 
 /* While a file is still in the cloud: hide the (src-less) image Obsidian's controls attach to. */
 .link-rescue-cloud-pending > img,
-.link-rescue-cloud-pending > .image-wrapper {
-	display: none;
+.link-rescue-cloud-pending > .image-wrapper,
+.link-rescue-cloud-pending > .embed-actions {
+	display: none !important;
 }
 
 .link-rescue-cloud-embed.is-retired {

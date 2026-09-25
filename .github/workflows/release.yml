@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check tag matches manifest version
+        run: test "$GITHUB_REF_NAME" = "$(jq -r .version manifest.json)" || { echo "tag $GITHUB_REF_NAME != manifest version"; exit 1; }
       - run: npm ci
       - run: npm test
       - run: npm run build

@@ -106,7 +106,8 @@ npm run build   # type-check + production build
 `scripts/icloud.swift` removes or restores local copies of iCloud files for testing:
 `swift scripts/icloud.swift status|evict|download <file>...` (evict skips files not yet uploaded).
 
-Releases: `npm version patch`, push the tag, and GitHub Actions builds a draft release.
+Releases: `npm version patch` (tags without a "v", via `.npmrc`), `git push --follow-tags`, and GitHub Actions
+builds a draft release from the tag.
 
 ## License
 
