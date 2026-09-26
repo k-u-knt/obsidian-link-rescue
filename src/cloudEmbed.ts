@@ -44,16 +44,22 @@ type State = "idle" | "downloading" | "failed" | "done" | "retired";
  * Positions come from the document itself rather than from `movementX/Y`, which the browser may compute from a stale
  * position (after a drag session, or after the pointer was over an embedded web page).
  */
+interface PointerSample {
+	x: number;
+	y: number;
+	t: number;
+	/** What the pointer was over (decides "outside the placeholder" exactly as the browser does: edges, corners). */
+	target: EventTarget | null;
+}
+
 interface PointerTrack {
-	prev?: { x: number; y: number; t: number };
-	last?: { x: number; y: number; t: number };
+	prev?: PointerSample;
+	last?: PointerSample;
 	scrolledAt: number;
 	/** When the document last lost sight of the pointer (it left the view, a native menu opened, the window changed). */
 	lostAt: number;
-	/** When content last moved under the pointer by layout (an embed above resized itself or went away). */
-	shiftedAt: number;
-	/** Pick up layout shifts the browser has recorded but not yet delivered. */
-	syncShifts: () => void;
+	/** Whether a layout shift since `since` moved this element (an embed above resized itself or went away). */
+	shiftMoved: (since: number, el: HTMLElement) => boolean;
 	dispose: () => void;
 }
 const tracks = new Map<Document, PointerTrack>();
@@ -64,7 +70,7 @@ function pointerTrack(doc: Document): PointerTrack {
 	const onMove = (e: PointerEvent) => {
 		if (e.pointerType !== "mouse") return;
 		track.prev = track.last;
-		track.last = { x: e.clientX, y: e.clientY, t: e.timeStamp };
+		track.last = { x: e.clientX, y: e.clientY, t: e.timeStamp, target: e.target };
 	};
 	// Scrolling moves content under a still pointer: positions seen before it say nothing about what's under it now.
 	const onScroll = (e: Event) => { track.scrolledAt = e.timeStamp; };
@@ -75,7 +81,14 @@ function pointerTrack(doc: Document): PointerTrack {
 	// Content moves under a still pointer when something above it resizes itself or goes away (a tweet reporting its
 	// height, an embed's line deleted): positions seen before that say nothing about what is under the pointer now.
 	let shifts: PerformanceObserver | undefined;
-	const noteShifts = (entries: PerformanceEntry[]) => { for (const e of entries) track.shiftedAt = Math.max(track.shiftedAt, e.startTime); };
+	type ShiftSource = { node?: Node | null; previousRect: DOMRectReadOnly; currentRect: DOMRectReadOnly };
+	let recent: Array<{ t: number; sources: ShiftSource[] }> = [];
+	const noteShifts = (entries: PerformanceEntry[]) => {
+		for (const e of entries) recent.push({ t: e.startTime, sources: (e as unknown as { sources?: ShiftSource[] }).sources ?? [] });
+		// Only the last few seconds matter.
+		const cutoff = (win ?? window).performance.now() - 5000;
+		recent = recent.filter((x) => x.t >= cutoff);
+	};
 	try {
 		const PO = (win as unknown as { PerformanceObserver?: typeof PerformanceObserver } | null)?.PerformanceObserver;
 		if (PO?.supportedEntryTypes?.includes("layout-shift")) {
@@ -88,8 +101,15 @@ function pointerTrack(doc: Document): PointerTrack {
 	const track: PointerTrack = {
 		scrolledAt: 0,
 		lostAt: 0,
-		shiftedAt: 0,
-		syncShifts: () => { if (shifts) noteShifts(shifts.takeRecords()); },
+		shiftMoved: (since, el) => {
+			if (shifts) noteShifts(shifts.takeRecords());
+			const r = el.getBoundingClientRect();
+			const overlaps = (q: DOMRectReadOnly) => q.width > 0 && q.height > 0
+				&& q.left < r.right && q.right > r.left && q.top < r.bottom && q.bottom > r.top;
+			return recent.some((x) => x.t >= since && x.sources.some((src) =>
+				(src.node && (src.node === el || src.node.contains(el) || el.contains(src.node)))
+				|| overlaps(src.previousRect) || overlaps(src.currentRect)));
+		},
 		dispose: () => {
 			shifts?.disconnect();
 			doc.removeEventListener("pointermove", onMove, true);
@@ -135,8 +155,6 @@ export class CloudPlaceholder {
 	private shownAt = 0;
 	/** Where the pointer was seen just outside before it came onto the placeholder. */
 	private entry: { x: number; y: number } | null = null;
-	/** Where the placeholder was when the pointer stopped on it. */
-	private armedRect: { left: number; top: number } | null = null;
 
 	constructor(
 		private host: CloudHost,
@@ -168,8 +186,7 @@ export class CloudPlaceholder {
 				// scroll, or already inside it: the placeholder appeared, scrolled or was dropped under the pointer and
 				// this is a wobble. The pointer has to be seen outside it first.
 				const prev = track.prev;
-				track.syncShifts();
-				if (!prev || prev.t < this.shownAt || prev.t < track.scrolledAt || prev.t <= track.shiftedAt) return;
+				if (!prev || prev.t < this.shownAt || prev.t < track.scrolledAt || track.shiftMoved(prev.t, this.box)) return;
 				// A position seen a while ago says nothing about where the pointer has been since: inside an embedded
 				// video, tweet or web page (this document doesn't see it there), or the window moved or zoomed under it.
 				// After a pause, only a single short step that the browser also reports as this move counts (a pointer
@@ -178,40 +195,20 @@ export class CloudPlaceholder {
 					const dx = evt.clientX - prev.x, dy = evt.clientY - prev.y;
 					if (Math.hypot(dx, dy) > MAX_STEP_PX || Math.abs(dx - evt.movementX) > 2 || Math.abs(dy - evt.movementY) > 2) return;
 				}
-				const r = this.box.getBoundingClientRect();
-				if (prev.x >= r.left && prev.x <= r.right && prev.y >= r.top && prev.y <= r.bottom) return;
+				// Outside means: the pointer was over something else (exact at edges and rounded corners).
+				if (prev.target instanceof Node) {
+					if (this.box.contains(prev.target)) return;
+				} else {
+					const r = this.box.getBoundingClientRect();
+					if (prev.x >= r.left && prev.x < r.right && prev.y >= r.top && prev.y < r.bottom) return;
+				}
 				this.movedOnto = true;
 				this.entry = { x: prev.x, y: prev.y };
 			}
 			// A jitter of a pixel or two across the edge doesn't count: the pointer has to travel onto the placeholder.
 			if (!this.entry || Math.hypot(evt.clientX - this.entry.x, evt.clientY - this.entry.y) < MIN_TRAVEL_PX) return;
 			this.cancelHover();
-			const at = this.box.getBoundingClientRect();
-			this.armedRect = { left: at.left, top: at.top };
-			const armedAt = evt.timeStamp;
-			this.hoverTimer = window.setTimeout(() => {
-				this.hoverTimer = null;
-				if (this.host.downloadMode !== "hover" || this.state !== "idle" || !this.box.isShown()) return;
-				// Still resting on it? `:hover` isn't updated while content scrolls on the compositor (trackpad) or moves by
-				// layout or transform (canvas pan), so check that the placeholder hasn't moved and is still what the pointer is on.
-				const last = track.last;
-				const r = this.box.getBoundingClientRect();
-				const was = this.armedRect;
-				if (!last || !was || track.lostAt > armedAt) return;
-				if (Math.abs(r.left - was.left) > 1 || Math.abs(r.top - was.top) > 1) return;
-				// What is under the pointer now (not a modal or menu that opened over it, not other content)?
-				if (!this.box.contains(this.box.doc.elementFromPoint(last.x, last.y))) return;
-				// Last seen heading into an embedded web page/video? This document doesn't see the pointer there.
-				const before = track.prev;
-				if (before) {
-					const dx = last.x - before.x, dy = last.y - before.y;
-					for (let k = 1; k <= 3; k++) {
-						const ahead = this.box.doc.elementFromPoint(last.x + dx * k, last.y + dy * k);
-						if (ahead?.closest("iframe, webview, embed, object")) return;
-					}
-				}
-				void this.start();
-			}, HOVER_DELAY_MS);
+			this.arm(track, evt.timeStamp, 0);
 		});
 		this.box.addEventListener("mouseleave", () => {
 			this.movedOnto = false;
@@ -229,6 +226,37 @@ export class CloudPlaceholder {
 			this.cancelHover();
 		});
 		this.render();
+	}
+
+	/**
+	 * Download after the pointer has rested HOVER_DELAY_MS on the placeholder. `:hover` isn't updated while content
+	 * scrolls on the compositor (trackpad) or moves by layout or transform (canvas pan), so on firing check that the
+	 * pointer is really still on it. If the placeholder moved but is still under the pointer (an image above finished
+	 * loading), wait for it to settle rather than giving up.
+	 */
+	private arm(track: PointerTrack, armedAt: number, settles: number) {
+		const at = this.box.getBoundingClientRect();
+		const was = { left: at.left, top: at.top };
+		this.hoverTimer = window.setTimeout(() => {
+			this.hoverTimer = null;
+			if (this.host.downloadMode !== "hover" || this.state !== "idle" || !this.box.isShown()) return;
+			const last = track.last;
+			if (!last || track.lostAt > armedAt) return;
+			// What is under the pointer now (not a modal or menu that opened over it, not other content)?
+			if (!this.box.contains(this.box.doc.elementFromPoint(last.x, last.y))) return;
+			const r = this.box.getBoundingClientRect();
+			if (Math.abs(r.left - was.left) > 1 || Math.abs(r.top - was.top) > 1) {
+				if (settles < 5) this.arm(track, armedAt, settles + 1);
+				return;
+			}
+			// Last seen heading into an embedded web page/video right next to it? This document doesn't see it there.
+			const before = track.prev;
+			if (before) {
+				const ahead = this.box.doc.elementFromPoint(2 * last.x - before.x, 2 * last.y - before.y);
+				if (ahead?.closest("iframe, webview, embed, object")) return;
+			}
+			void this.start();
+		}, HOVER_DELAY_MS);
 	}
 
 	private cancelHover() {
