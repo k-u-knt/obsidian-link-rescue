@@ -185,3 +185,25 @@
 	display: inline-block;
 	max-width: 100%;
 }
+
+/* Themes that zoom a pressed image embed to full screen (Cupertino, Minimal, Things: ".image-embed:active { position:
+   fixed }") would move a placeholder out from under the pointer while it's pressed. It has no image to zoom: keep it
+   where it is. */
+.link-rescue-cloud-pending:active {
+	position: relative !important;
+	inset: auto !important;
+	z-index: auto !important;
+	background: none !important;
+	justify-content: normal !important;
+	animation: none !important;
+	cursor: pointer !important;
+}
+
+.link-rescue-cloud-pending:active::before,
+.link-rescue-cloud-pending:active::after {
+	content: none !important;
+}
+
+.link-rescue-cloud-pending:active > .link-rescue-cloud-embed {
+	flex: 1 1 auto;
+}

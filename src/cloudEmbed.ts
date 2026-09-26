@@ -42,6 +42,8 @@ const MIN_TRAVEL_PX = 4;
 const MAX_GAP_MS = 100;
 /** Longest single step onto a placeholder accepted after a pause. */
 const MAX_STEP_PX = 32;
+/** A press released within this distance of where it started is a click, even if the placeholder moved meanwhile. */
+const CLICK_SLOP_PX = 6;
 
 export interface CloudHost {
 	readonly downloadMode: DownloadMode;
@@ -79,6 +81,11 @@ interface PointerTrack {
 	dispose: () => void;
 }
 const tracks = new Map<Document, PointerTrack>();
+/**
+ * How the last press on a placeholder ended (click, or dragged off it). Its click event, which pointer capture sends to
+ * the placeholder either way, must agree. Shared by all windows: Obsidian re-dispatches a popout's clicks in the main one.
+ */
+let released: { p: CloudPlaceholder; click: boolean } | null = null;
 
 function pointerTrack(doc: Document): PointerTrack {
 	const known = tracks.get(doc);
@@ -126,33 +133,52 @@ function pointerTrack(doc: Document): PointerTrack {
 		const el = t && typeof t.closest === "function" ? t.closest(".link-rescue-cloud-embed") : null;
 		return el ? boxes.get(el) ?? null : null;
 	};
-	let pressed: CloudPlaceholder | null = null;
+	// A left press on a placeholder: which one, and where the pointer was.
+	let pressed: { p: CloudPlaceholder; box: Element; id: number; x: number; y: number } | null = null;
 	const onDown = (e: PointerEvent) => {
 		const p = boxOf(e);
+		pressed = null;
+		released = null;
 		if (!p) return;
 		e.preventDefault();
 		e.stopPropagation();
-		pressed = e.button === 0 ? p : null;
+		if (e.button !== 0) return;
+		const t = e.target as Element;
+		pressed = { p, box: t.closest(".link-rescue-cloud-embed") ?? t, id: e.pointerId, x: e.clientX, y: e.clientY };
+		// Keep the rest of this press ours even if the placeholder moves out from under a still pointer while it is
+		// held: themes (Cupertino, Minimal, Things) zoom a pressed .image-embed to full screen with
+		// ":active { position: fixed }", and the release then lands on the zoomed container instead.
+		try { pressed.box.setPointerCapture(e.pointerId); } catch { /* detached, or not a capturable pointer */ }
 	};
 	const onUp = (e: PointerEvent) => {
 		const was = pressed;
 		pressed = null;
-		// Only a press that began on this same placeholder is ours; releases of other presses (a text selection or a
-		// drag ending here) go on to their owners untouched.
+		if (!was || e.pointerId !== was.id) return;
+		// With pointer capture the release is targeted at the pressed placeholder; without it (capture refused), at
+		// whatever is under the pointer now.
 		const p = boxOf(e);
-		if (!p || was !== p) return;
+		const moved = Math.hypot(e.clientX - was.x, e.clientY - was.y);
+		// A click is a release over the same placeholder, or one that didn't travel (whatever moved under it).
+		// A press that travelled off it (a drag) doesn't count.
+		const there = was.box.ownerDocument.elementFromPoint(e.clientX, e.clientY);
+		const over = !!there && was.box.contains(there);
+		if (p !== was.p && moved > CLICK_SLOP_PX) return;
 		e.preventDefault();
 		e.stopPropagation();
-		if (e.button === 0) p.activate();
+		released = { p: was.p, click: e.button === 0 && (over || moved <= CLICK_SLOP_PX) };
+		if (released.click) was.p.activate();
 	};
+	const onCancel = (e: PointerEvent) => { if (pressed?.id === e.pointerId) pressed = null; };
 	const onMouse = (e: MouseEvent) => {
 		const p = boxOf(e);
 		if (!p) return;
 		e.preventDefault();
 		e.stopPropagation();
-		// Safety net if the release wasn't seen as ours (e.g. pointer capture retargeted it): a click on the
-		// placeholder also downloads. activate() does nothing once a download has started, so both firing is harmless.
-		if (e.type === "click" && e.button === 0) p.activate();
+		// Safety net if the release wasn't seen as ours: a click on the placeholder also downloads, unless its press
+		// was seen travelling off the placeholder (pointer capture sends that click here too). activate() does nothing
+		// once a download has started, so both firing is harmless.
+		if (e.type !== "click" || e.button !== 0) return;
+		if (released?.p === p ? released.click : true) p.activate();
 	};
 	const mouseTypes = ["mousedown", "click", "dblclick", "auxclick"];
 	const track: PointerTrack = {
@@ -178,6 +204,7 @@ function pointerTrack(doc: Document): PointerTrack {
 			win?.removeEventListener("resize", onResize);
 			win?.removeEventListener("pointerdown", onDown, true);
 			win?.removeEventListener("pointerup", onUp, true);
+			win?.removeEventListener("pointercancel", onCancel, true);
 			for (const t of mouseTypes) win?.removeEventListener(t, onMouse as EventListener, true);
 		},
 	};
@@ -190,6 +217,7 @@ function pointerTrack(doc: Document): PointerTrack {
 	win?.addEventListener("resize", onResize);
 	win?.addEventListener("pointerdown", onDown, true);
 	win?.addEventListener("pointerup", onUp, true);
+	win?.addEventListener("pointercancel", onCancel, true);
 	for (const t of mouseTypes) win?.addEventListener(t, onMouse as EventListener, true);
 	tracks.set(doc, track);
 	return track;
