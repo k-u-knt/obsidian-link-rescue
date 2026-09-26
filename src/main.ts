@@ -5,8 +5,8 @@ import {
 } from "obsidian";
 import { around } from "monkey-around";
 import {
-	CloudEmbed, CloudHost, CloudPlaceholder, DownloadMode, EmbedCreator, disposePointerTracks, formatSize, gateHtmlMedia,
-	gateMediaEmbed,
+	CloudEmbed, CloudHost, CloudPlaceholder, DownloadMode, EmbedCreator, describePlaceholderAt, disposePointerTracks,
+	formatSize, gateHtmlMedia, gateMediaEmbed,
 } from "./cloudEmbed";
 import { DiagnosticsModal } from "./diagnostics";
 import { ICloud } from "./icloud";
@@ -166,6 +166,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 				});
 				return true;
 			},
+		});
+		this.addCommand({
+			id: "record-click-diagnostics",
+			name: "Record click diagnostics (60 s)",
+			callback: () => this.recordClickDiagnostics(),
 		});
 		this.addCommand({
 			id: "download-note-icloud-files",
@@ -648,6 +653,48 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			if (cloud || leaf.view.containerEl.querySelector(".link-rescue-cloud-embed")) rebuild(leaf);
 		}
 		for (const leaf of this.app.workspace.getLeavesOfType("canvas")) rebuild(leaf);
+	}
+
+	/**
+	 * For a minute, log every press/click the window sees (what was under the pointer and what Link Rescue knew about it)
+	 * to click-debug.log in the plugin folder, to find out what stops a click from downloading.
+	 */
+	private recordClickDiagnostics() {
+		const logPath = `${this.manifest.dir}/click-debug.log`;
+		const lines: string[] = [`# Link Rescue click diagnostics, ${new Date().toString()}`, `mode=${this.settings.downloadMode}`];
+		const describe = (el: Element | null) => {
+			const out: string[] = [];
+			for (let e = el, i = 0; e && i < 5; e = e.parentElement, i++) {
+				out.push(`${e.tagName.toLowerCase()}${e.classList.length ? "." + [...e.classList].slice(0, 4).join(".") : ""}`);
+			}
+			return out.join(" < ");
+		};
+		const view = (el: Element | null) => el?.closest(".markdown-reading-view") ? "reading" : el?.closest(".markdown-source-view") ? "live-preview/source" : "other";
+		const handler = (phase: string) => (e: Event) => {
+			const me = e as MouseEvent;
+			const target = e.target instanceof Element ? e.target : null;
+			if (!target?.closest(".link-rescue-cloud-pending, .link-rescue-cloud-embed, .internal-embed")) return;
+			const top = me.clientX !== undefined ? document.elementFromPoint(me.clientX, me.clientY) : null;
+			lines.push(`${new Date().toISOString().slice(11, 23)} ${phase} ${e.type} button=${me.button} view=${view(target)} ` +
+				`defaultPrevented=${e.defaultPrevented} | target: ${describe(target)} | ${describePlaceholderAt(target)} | ` +
+				`on top at point: ${describe(top)}`);
+		};
+		const types = ["pointerdown", "pointerup", "mousedown", "mouseup", "click"];
+		const cap = handler("window-capture"), bub = handler("document-bubble");
+		for (const t of types) {
+			window.addEventListener(t, cap, true);
+			document.addEventListener(t, bub, false);
+		}
+		new Notice("Link Rescue: recording clicks for 60 s. Click a placeholder in reading view now.", 8000);
+		window.setTimeout(async () => {
+			for (const t of types) {
+				window.removeEventListener(t, cap, true);
+				document.removeEventListener(t, bub, false);
+			}
+			lines.push(`# end; placeholders tracked: ${this.placeholders.size}`);
+			await this.app.vault.adapter.write(logPath, lines.join("\n") + "\n");
+			new Notice("Link Rescue: click diagnostics saved.");
+		}, 60000);
 	}
 
 	/** iPhone/iPad: keep the placeholder index current so "not downloaded here" isn't mistaken for "missing". */

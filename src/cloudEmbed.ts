@@ -25,6 +25,15 @@ const VISIBLE_DELAY_MS = 400;
 /** Placeholder boxes → their placeholder, for the window-level click handling. */
 const boxes = new WeakMap<Element, CloudPlaceholder>();
 
+/** For the click diagnostics command: what Link Rescue knows about an element under the pointer. */
+export function describePlaceholderAt(target: EventTarget | null): string {
+	const t = target as { closest?: (sel: string) => Element | null } | null;
+	const box = t && typeof t.closest === "function" ? t.closest(".link-rescue-cloud-embed") : null;
+	if (!box) return "not a placeholder";
+	const p = boxes.get(box);
+	return p ? `placeholder ${p.file.name}: state=${p.stateName}, connected=${box.isConnected}` : "placeholder box NOT registered (stale?)";
+}
+
 /** How long the pointer must rest on a placeholder before "hover" mode downloads it (skips passing sweeps). */
 const HOVER_DELAY_MS = 350;
 /** How far the pointer must travel from where it was seen outside a placeholder (skips hand jitter at an edge). */
@@ -370,6 +379,10 @@ export class CloudPlaceholder {
 		if (this.state === "idle" || this.state === "failed") this.render();
 		// Switching to "When visible" applies to placeholders already on screen (restart the countdown).
 		this.onVisibility();
+	}
+
+	get stateName(): string {
+		return this.state;
 	}
 
 	get pending(): boolean {
