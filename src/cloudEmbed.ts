@@ -501,15 +501,20 @@ export function gateHtmlMedia(host: CloudHost, el: HTMLElement, file: TFile, src
 	else el.removeAttribute("src");
 	el.setAttr("data-link-rescue-src", src);
 	media.addClass("link-rescue-hidden");
+	// Wrap the element with its placeholder while it waits, and put it back exactly where it was once downloaded,
+	// so layouts and CSS that depend on the element's position (e.g. "img:not(:first-child)") are unaffected.
 	const holder = createSpan({ cls: "link-rescue-html-holder" });
 	media.insertAdjacentElement("beforebegin", holder);
+	holder.appendChild(media);
+	// Keep a fragment such as "#page=3" (PDF) or "#t=10" (video) when revealing.
+	const hash = src.includes("#") ? src.slice(src.indexOf("#")) : "";
 	const placeholder = new CloudPlaceholder(host, holder, file, async () => {
-		holder.remove();
+		holder.replaceWith(media);
 		media.removeClass("link-rescue-hidden");
 		el.removeAttribute("data-link-rescue-src");
-		if (el.tagName === "IMG") await setSrc(el as HTMLImageElement, resourcePath());
+		if (el.tagName === "IMG") await setSrc(el as HTMLImageElement, resourcePath() + hash);
 		else {
-			el.setAttr("src", resourcePath());
+			el.setAttr("src", resourcePath() + hash);
 			if (media instanceof HTMLMediaElement) media.load();
 		}
 	});
