@@ -665,7 +665,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		const describe = (el: Element | null) => {
 			const out: string[] = [];
 			for (let e = el, i = 0; e && i < 5; e = e.parentElement, i++) {
-				out.push(`${e.tagName.toLowerCase()}${e.classList.length ? "." + [...e.classList].slice(0, 4).join(".") : ""}`);
+				out.push(`${e.tagName.toLowerCase()}${e.classList.length ? "." + Array.from(e.classList).slice(0, 4).join(".") : ""}`);
 			}
 			return out.join(" < ");
 		};
