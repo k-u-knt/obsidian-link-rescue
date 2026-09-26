@@ -12,8 +12,11 @@ export interface EmbedComponent extends Component {
 
 export type EmbedCreator = (ctx: EmbedContext, file: TFile, subpath?: string) => EmbedComponent | null;
 
-/** When a file that is only in the cloud gets downloaded. */
-export type DownloadMode = "auto" | "hover" | "manual";
+/**
+ * When a file that is only in the cloud gets downloaded. Never because a note opened or scrolled into view:
+ * "hover" (shown as Automatic) when the user points at its placeholder, "manual" only when the user clicks it.
+ */
+export type DownloadMode = "hover" | "manual";
 
 /** How long the pointer must rest on a placeholder before "hover" mode downloads it (skips passing sweeps). */
 const HOVER_DELAY_MS = 350;
@@ -251,7 +254,6 @@ export class CloudPlaceholder {
 		this.host.track(this);
 		// Export to PDF waits for loadFile(); download so the export shows the file, not the placeholder.
 		if (this.containerEl.closest("body > .print")) return this.start();
-		if (this.host.downloadMode === "auto") return Promise.race([this.start(), sleep(5000)]);
 		return Promise.resolve();
 	}
 
@@ -304,7 +306,7 @@ export class CloudPlaceholder {
 	private hint(): string {
 		// Canvas covers cards that aren't selected, so the pointer only reaches the placeholder after selecting.
 		const card = this.containerEl.closest(".canvas-node") ? "Select the card, then " : "";
-		const action = this.host.downloadMode === "hover" ? "point at it (or click) to download." : "click to download.";
+		const action = this.host.downloadMode === "hover" ? "point at it to download." : "click to download.";
 		return card ? card + action : action.charAt(0).toUpperCase() + action.slice(1);
 	}
 

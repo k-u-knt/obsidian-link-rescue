@@ -45,10 +45,10 @@ Unicode normalization form.
   | cloud with slash | No matching file in the vault |
 
 - **iCloud files (macOS).** Images, PDFs, audio and video that are still only in iCloud show a placeholder
-  with the file's size, so opening a note doesn't silently download everything it embeds. By default
-  (**On hover**) a file downloads only when you rest the pointer on its placeholder, which keeps local storage
-  free. **Automatic** downloads them as soon as a note shows them; **Manual** waits for a click. A message says
-  when files have been downloaded, and the status bar shows downloads in progress.
+  with the file's size. Opening or scrolling a note never downloads them, which keeps local storage free.
+  **Automatic** (default) downloads a file when you move the pointer onto its placeholder and rest it there;
+  **Manual** downloads it only when you click the placeholder. A message says when files have been downloaded,
+  and the status bar shows downloads in progress.
 - **Vault scan.** The command *Find and repair broken links in vault* lists every repairable link, and the
   empty notes that "Click to create" left behind, and fixes them in one go.
 
@@ -57,7 +57,7 @@ Unicode normalization form.
 - **Repair broken links in current note**
 - **Find and repair broken links in vault**
 - **Download cloud files embedded in current note** (macOS)
-- **Cycle cloud download mode (on hover → automatic → manual)** (macOS)
+- **Switch cloud downloads between automatic (on hover) and manual (on click)** (macOS)
 
 ## Settings
 
@@ -65,17 +65,23 @@ Unicode normalization form.
 |---|---|
 | Repair links when a note opens | on |
 | Open the matching file instead of creating an empty note | on |
-| iCloud downloads: On hover / Automatic / Manual (macOS) | On hover |
+| iCloud downloads: Automatic (on hover) / Manual (on click) (macOS) | Automatic |
 | Notify about iCloud downloads (macOS) | on |
 | Show status icons | on |
 
-### Known limits of "On hover"
+### Known limits
 
 The plugin holds back embeds (`![[…]]`, `![](…)`) and HTML `<img>`/`<video>`/`<audio>` in notes. A few places in
 Obsidian load files by other routes and can still download a cloud-only file: the image lightbox, the Live Preview
 image-edit popup, and Bases image values and card covers. In canvas, select a card first; Obsidian covers unselected cards. With a pen or when dragging, click instead of
 pointing. `file:///` links to files outside the vault aren't held back, nor are `![](file:///…)` images in Live Preview
 (reading view holds them back) or canvas group background images.
+
+### Other plugins
+
+Plugins that draw images themselves bypass the placeholders and download files as they come into view. For
+example, turn off "Render images" and "Render PDF" in *Image in Editor*: Obsidian's Live Preview already shows
+images.
 
 ### Git users
 

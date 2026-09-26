@@ -20,8 +20,9 @@ interface LinkRescueSettings {
 	/** Repair a note's broken links automatically when it is opened. */
 	autoRepair: boolean;
 	/**
-	 * macOS: when files that are only in iCloud get downloaded: when the pointer rests on them ("hover", the default,
-	 * so opening a note never fills local storage), as soon as a note shows them ("auto"), or on click ("manual").
+	 * macOS: when files that are only in iCloud get downloaded. Never because a note opened or scrolled into view
+	 * (protects local storage): "hover" (Automatic, the default) when the pointer rests on the placeholder, "manual"
+	 * only when the placeholder is clicked.
 	 */
 	downloadMode: DownloadMode;
 	/** Show a message when files have been downloaded from iCloud. */
@@ -120,8 +121,8 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		this.app.workspace.onLayoutReady(() => {
 			if (this.migratedToHover) {
 				void this.saveSettings();
-				if (this.icloud.available) new Notice("Link Rescue: iCloud files now download only when you point at them, " +
-					"so opening a note no longer fills local storage. You can change this in the plugin's settings.", 12000);
+				if (this.icloud.available) new Notice("Link Rescue: iCloud files now download only when you point at them " +
+					"(or, in Manual mode, click them), so opening a note no longer fills local storage.", 12000);
 			}
 			this.rebuildIndex();
 			// Registered after layout-ready so the initial vault load doesn't fire "create" for every file.
@@ -175,11 +176,10 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		});
 		this.addCommand({
 			id: "toggle-auto-download",
-			name: "Cycle cloud download mode (on hover → automatic → manual)",
+			name: "Switch cloud downloads between automatic (on hover) and manual (on click)",
 			checkCallback: (checking) => {
 				if (!this.icloud.available) return false;
-				const next: Record<DownloadMode, DownloadMode> = { hover: "auto", auto: "manual", manual: "hover" };
-				if (!checking) this.setDownloadMode(next[this.settings.downloadMode]);
+				if (!checking) void this.setDownloadMode(this.settings.downloadMode === "hover" ? "manual" : "hover");
 				return true;
 			},
 		});
@@ -217,14 +217,15 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 	async loadSettings() {
 		const data = (await this.loadData()) ?? {};
-		// 0.1.x saved "auto" as its default; 0.2 protects local storage by default. Move it over once.
-		if (data.settingsVersion === undefined && data.downloadMode === "auto") {
+		// "Download as soon as a note shows it" no longer exists (it filled local storage): it becomes Automatic (on hover).
+		// 0.1.x users had it as their default, so tell them once.
+		if (data.downloadMode === "auto") {
 			data.downloadMode = "hover";
-			this.migratedToHover = true;
+			if (data.settingsVersion === undefined) this.migratedToHover = true;
 		}
 		this.settings = {
 			autoRepair: data.autoRepair ?? DEFAULT_SETTINGS.autoRepair,
-			downloadMode: ["auto", "hover", "manual"].includes(data.downloadMode)
+			downloadMode: ["hover", "manual"].includes(data.downloadMode)
 				? data.downloadMode
 				: data.autoDownload === false ? "manual" : DEFAULT_SETTINGS.downloadMode,
 			notifyDownloads: data.notifyDownloads ?? DEFAULT_SETTINGS.notifyDownloads,
@@ -484,17 +485,13 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	async setDownloadMode(mode: DownloadMode) {
 		this.settings.downloadMode = mode;
 		await this.saveSettings();
-		// Placeholders already on screen follow the new mode right away.
-		const waiting = this.pendingPlaceholders();
-		waiting.forEach((p) => p.refresh());
-		if (mode === "auto") waiting.forEach((p) => void p.start());
-		const files = new Set(waiting.map((p) => p.file.path)).size;
+		// Placeholders already on screen show the new hint right away (switching never starts downloads).
+		this.pendingPlaceholders().forEach((p) => p.refresh());
 		const where = this.cloudName;
-		new Notice(mode === "auto"
-			? `Link Rescue: ${where} downloads are automatic.${files ? ` Downloading ${files} file${files === 1 ? "" : "s"} now…` : ""}`
-			: mode === "hover"
-				? `Link Rescue: ${where} files download when you point at them. Opening a note downloads nothing.`
-				: `Link Rescue: ${where} downloads are manual. Files still in ${where} show a placeholder; click it to download.`);
+		new Notice(mode === "hover"
+			? `Link Rescue: ${where} downloads are automatic: a file downloads when you point at its placeholder. ` +
+				"Opening or scrolling a note downloads nothing."
+			: `Link Rescue: ${where} downloads are manual: a file downloads only when you click its placeholder.`);
 	}
 
 	/** In manual mode, say once per note how many of its files are still only in the cloud. */
@@ -1121,13 +1118,12 @@ class LinkRescueSettingTab extends PluginSettingTab {
 		if (this.plugin.icloud.available) {
 			new Setting(containerEl)
 				.setName("iCloud downloads")
-				.setDesc("For images, PDFs, audio and video that are still only in iCloud. On hover: opening a note " +
-					"downloads nothing; a file downloads when you rest the pointer on its placeholder (protects local storage). " +
-					"Automatic: download as soon as a note shows them. Manual: download only when you click.")
+				.setDesc("For images, PDFs, audio and video that are still only in iCloud. Opening or scrolling a note never " +
+					"downloads them (protects local storage); each shows a placeholder. Automatic: a file downloads when you " +
+					"point at its placeholder. Manual: only when you click it.")
 				.addDropdown((d) => d
-					.addOption("hover", "On hover (default)")
-					.addOption("auto", "Automatic")
-					.addOption("manual", "Manual (click to download)")
+					.addOption("hover", "Automatic (when you point at it)")
+					.addOption("manual", "Manual (when you click it)")
 					.setValue(this.plugin.settings.downloadMode)
 					.onChange((v) => this.plugin.setDownloadMode(v as DownloadMode)));
 			// `git status` (e.g. from the Git plugin) re-reads files whose stat changed, which downloads evicted files.
