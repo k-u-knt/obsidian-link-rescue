@@ -76,7 +76,11 @@ function pointerTrack(doc: Document): PointerTrack {
 	if (known) return known;
 	const onMove = (e: PointerEvent) => {
 		if (e.pointerType !== "mouse") return;
-		track.prev = track.last;
+		// If the page was busy, the browser merges several moves into one event; the sample just before this one
+		// is then the real previous position (a small step), not the last event from before the stall.
+		const merged = e.getCoalescedEvents?.() ?? [];
+		const before = merged.length > 1 ? merged[merged.length - 2] : null;
+		track.prev = before ? { x: before.clientX, y: before.clientY, t: before.timeStamp, target: null } : track.last;
 		track.last = { x: e.clientX, y: e.clientY, t: e.timeStamp, target: e.target };
 	};
 	// Scrolling moves content under a still pointer: positions seen before it say nothing about what's under it now.
@@ -234,13 +238,14 @@ export class CloudPlaceholder {
 					const dx = evt.clientX - prev.x, dy = evt.clientY - prev.y;
 					if (Math.hypot(dx, dy) > MAX_STEP_PX || Math.abs(dx - evt.movementX) > 2 || Math.abs(dy - evt.movementY) > 2) return;
 				}
-				// Outside means: the pointer was over something else (exact at edges and rounded corners).
-				if (prev.target instanceof Node) {
-					if (this.box.contains(prev.target)) return;
-				} else {
-					const r = this.box.getBoundingClientRect();
-					if (prev.x >= r.left && prev.x < r.right && prev.y >= r.top && prev.y < r.bottom) return;
-				}
+				// Outside means: the pointer was over something else (exact at edges and rounded corners). Checked with
+				// what it was over then (if that's still on the page; `instanceof` fails across popout windows)...
+				const then = prev.target as Node | null;
+				if (then && typeof then.nodeType === "number" && then.isConnected && this.box.contains(then)) return;
+				// ...and with what is at that spot now: content moves or appears under a still pointer without a
+				// scroll (canvas pan, a menu or modal closing, the placeholder re-rendering, a mode switch).
+				const there = this.box.doc.elementFromPoint(prev.x, prev.y);
+				if (there ? this.box.contains(there) : this.insideRect(prev.x, prev.y)) return;
 				this.movedOnto = true;
 				this.entry = { x: prev.x, y: prev.y };
 			}
@@ -266,6 +271,11 @@ export class CloudPlaceholder {
 			this.watchVisibility();
 		});
 		this.render();
+	}
+
+	private insideRect(x: number, y: number): boolean {
+		const r = this.box.getBoundingClientRect();
+		return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 	}
 
 	/** A click (press and release) on the placeholder: download, in every mode. */
@@ -312,7 +322,8 @@ export class CloudPlaceholder {
 	private arm(track: PointerTrack, armedAt: number, settles: number) {
 		const at = this.box.getBoundingClientRect();
 		const was = { left: at.left, top: at.top };
-		this.hoverTimer = window.setTimeout(() => {
+		const win = this.box.win;
+		this.hoverTimer = win.setTimeout(() => {
 			this.hoverTimer = null;
 			if (this.host.downloadMode !== "hover" || this.state !== "idle" || !this.box.isShown()) return;
 			const last = track.last;
@@ -335,7 +346,7 @@ export class CloudPlaceholder {
 	}
 
 	private cancelHover() {
-		if (this.hoverTimer !== null) window.clearTimeout(this.hoverTimer);
+		if (this.hoverTimer !== null) this.box.win.clearTimeout(this.hoverTimer);
 		this.hoverTimer = null;
 	}
 
