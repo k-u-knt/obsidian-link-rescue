@@ -367,7 +367,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 					}
 					const result = next.call(this, el, sourcePath);
 					// Export to PDF waits for promises returned by post-processors: make it wait for these downloads.
-					if (waits.length && el.closest?.(".print")) return Promise.all(waits).then(() => undefined) as unknown as void;
+					if (waits.length && el.closest?.("body > .print")) return Promise.all(waits).then(() => undefined) as unknown as void;
 					return result;
 				};
 			},

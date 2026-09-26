@@ -17,6 +17,8 @@ export type DownloadMode = "auto" | "hover" | "manual";
 
 /** How long the pointer must rest on a placeholder before "hover" mode downloads it (skips passing sweeps). */
 const HOVER_DELAY_MS = 350;
+/** How far the pointer must travel from where it was seen outside a placeholder (skips hand jitter at an edge). */
+const MIN_TRAVEL_PX = 4;
 
 export interface CloudHost {
 	readonly downloadMode: DownloadMode;
@@ -39,6 +41,8 @@ interface PointerTrack {
 	prev?: { x: number; y: number; t: number };
 	last?: { x: number; y: number; t: number };
 	scrolledAt: number;
+	/** When the document last lost sight of the pointer (it left the view, a native menu opened, the window changed). */
+	lostAt: number;
 	dispose: () => void;
 }
 const tracks = new Map<Document, PointerTrack>();
@@ -53,15 +57,28 @@ function pointerTrack(doc: Document): PointerTrack {
 	};
 	// Scrolling moves content under a still pointer: positions seen before it say nothing about what's under it now.
 	const onScroll = (e: Event) => { track.scrolledAt = e.timeStamp; };
+	// The pointer can travel where this document doesn't see it: another window or app, a native (macOS) context menu.
+	const lose = () => { track.prev = track.last = undefined; track.lostAt = (win ?? window).performance.now(); };
+	const onOut = (e: PointerEvent) => { if (!e.relatedTarget) lose(); };
+	const win = doc.defaultView;
 	const track: PointerTrack = {
 		scrolledAt: 0,
+		lostAt: 0,
 		dispose: () => {
 			doc.removeEventListener("pointermove", onMove, true);
 			doc.removeEventListener("scroll", onScroll, true);
+			doc.removeEventListener("pointerout", onOut, true);
+			doc.removeEventListener("contextmenu", lose, true);
+			win?.removeEventListener("blur", lose);
+			win?.removeEventListener("focus", lose);
 		},
 	};
 	doc.addEventListener("pointermove", onMove, true);
 	doc.addEventListener("scroll", onScroll, true);
+	doc.addEventListener("pointerout", onOut, true);
+	doc.addEventListener("contextmenu", lose, true);
+	win?.addEventListener("blur", lose);
+	win?.addEventListener("focus", lose);
 	tracks.set(doc, track);
 	return track;
 }
@@ -87,6 +104,10 @@ export class CloudPlaceholder {
 	private movedOnto = false;
 	/** When this placeholder was last inserted or re-shown; pointer positions seen before then don't count. */
 	private shownAt = 0;
+	/** Where the pointer was seen just outside before it came onto the placeholder. */
+	private entry: { x: number; y: number } | null = null;
+	/** Where the placeholder was when the pointer stopped on it. */
+	private armedRect: { left: number; top: number } | null = null;
 
 	constructor(
 		private host: CloudHost,
@@ -110,34 +131,54 @@ export class CloudPlaceholder {
 		this.box.addEventListener("mousemove", (evt: MouseEvent) => {
 			if (this.host.downloadMode !== "hover" || this.state !== "idle") return;
 			if (evt.movementX === 0 && evt.movementY === 0) return;
+			// Dragging (a text selection, a card) isn't pointing at the file.
+			if (evt.buttons !== 0) return;
+			const track = pointerTrack(this.box.doc);
 			if (!this.movedOnto) {
 				// Where was the pointer just before this move? Unknown, seen before the placeholder appeared or before a
 				// scroll, or already inside it: the placeholder appeared, scrolled or was dropped under the pointer and
 				// this is a wobble. The pointer has to be seen outside it first.
-				const track = pointerTrack(this.box.doc);
 				const prev = track.prev;
 				if (!prev || prev.t < this.shownAt || prev.t < track.scrolledAt) return;
 				const r = this.box.getBoundingClientRect();
 				if (prev.x >= r.left && prev.x <= r.right && prev.y >= r.top && prev.y <= r.bottom) return;
 				this.movedOnto = true;
+				this.entry = { x: prev.x, y: prev.y };
 			}
+			// A jitter of a pixel or two across the edge doesn't count: the pointer has to travel onto the placeholder.
+			if (!this.entry || Math.hypot(evt.clientX - this.entry.x, evt.clientY - this.entry.y) < MIN_TRAVEL_PX) return;
 			this.cancelHover();
+			const at = this.box.getBoundingClientRect();
+			this.armedRect = { left: at.left, top: at.top };
+			const armedAt = evt.timeStamp;
 			this.hoverTimer = window.setTimeout(() => {
 				this.hoverTimer = null;
-				if (this.host.downloadMode === "hover" && this.state === "idle" && this.box.isShown() && this.box.matches(":hover")) {
-					void this.start();
-				}
+				if (this.host.downloadMode !== "hover" || this.state !== "idle" || !this.box.isShown()) return;
+				// Still resting on it? `:hover` isn't updated while content scrolls on the compositor (trackpad) or moves by
+				// layout or transform (canvas pan), so check that the placeholder hasn't moved and is still what the pointer is on.
+				const last = track.last;
+				const r = this.box.getBoundingClientRect();
+				const was = this.armedRect;
+				if (!last || !was || track.lostAt > armedAt) return;
+				if (Math.abs(r.left - was.left) > 1 || Math.abs(r.top - was.top) > 1) return;
+				// What is under the pointer now (not a modal or menu that opened over it, not other content)?
+				if (!this.box.contains(this.box.doc.elementFromPoint(last.x, last.y))) return;
+				void this.start();
 			}, HOVER_DELAY_MS);
 		});
 		this.box.addEventListener("mouseleave", () => {
 			this.movedOnto = false;
+			this.entry = null;
 			this.cancelHover();
 		});
 		pointerTrack(this.box.doc);
 		// Inserted, re-attached (reading view virtualization) or re-shown (tab switch): start over.
 		this.box.onNodeInserted(() => {
-			this.shownAt = performance.now();
+			// Popout windows have their own document and clock: track that document, time on that window's clock.
+			pointerTrack(this.box.doc);
+			this.shownAt = this.box.win.performance.now();
 			this.movedOnto = false;
+			this.entry = null;
 			this.cancelHover();
 		});
 		this.render();
@@ -165,7 +206,7 @@ export class CloudPlaceholder {
 	begin(): Promise<void> {
 		this.host.track(this);
 		// Export to PDF waits for loadFile(); download so the export shows the file, not the placeholder.
-		if (this.containerEl.closest(".print")) return this.start();
+		if (this.containerEl.closest("body > .print")) return this.start();
 		if (this.host.downloadMode === "auto") return Promise.race([this.start(), sleep(5000)]);
 		return Promise.resolve();
 	}
@@ -303,7 +344,7 @@ export function gateHtmlMedia(host: CloudHost, el: HTMLElement, file: TFile, src
 		}
 	});
 	// The element is often still detached while post-processors run; once inserted, an Export to PDF needs the file.
-	holder.onNodeInserted(() => { if (holder.closest(".print")) void placeholder.start(); }, true);
+	holder.onNodeInserted(() => { if (holder.closest("body > .print")) void placeholder.start(); }, true);
 	return placeholder.begin();
 }
 
