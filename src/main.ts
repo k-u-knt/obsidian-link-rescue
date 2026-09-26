@@ -1,5 +1,6 @@
 import {
-	App, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, debounce, setIcon,
+	App, FileSystemAdapter, MarkdownView, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf,
+	debounce, normalizePath, setIcon,
 	setTooltip,
 } from "obsidian";
 import { around } from "monkey-around";
@@ -355,21 +356,42 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			fixFileLinks(next: Fix): Fix {
 				return function (this: App, el: HTMLElement, sourcePath: string) {
 					if (!plugin.unloaded && el?.findAll) {
-						for (const media of el.findAll("img, audio, video, source")) {
-							const src = media.getAttr("src");
-							// Only relative vault paths (not URLs, data:, app://, or absolute paths).
-							if (!src || /^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("/")) continue;
-							let linktext = src;
-							try { linktext = decodeURI(src); } catch { /* keep raw */ }
-							const file = plugin.app.metadataCache.getFirstLinkpathDest(obsidianLinktext(splitSubpath(linktext).path), sourcePath ?? "");
+						for (const media of el.findAll("img, audio, video, source, iframe")) {
+							const file = plugin.htmlMediaTarget(media, sourcePath ?? "");
 							if (!file || !plugin.icloud.isDatalessSync(file.path)) continue;
-							gateHtmlMedia(plugin, media, file, src, () => plugin.app.vault.getResourcePath(file));
+							gateHtmlMedia(plugin, media, file, media.getAttr("src") ?? "", () => plugin.app.vault.getResourcePath(file));
 						}
 					}
 					return next.call(this, el, sourcePath);
 				};
 			},
 		}));
+	}
+
+	/** The vault file Obsidian's fixFileLinks would load for this element, resolved exactly the way it does. */
+	htmlMediaTarget(media: HTMLElement, sourcePath: string): TFile | null {
+		const src = media.getAttr("src");
+		if (!src) return null;
+		const tag = media.tagName;
+		// Skip what the browser would take from elsewhere: <picture> with its own <source srcset>, <source> under
+		// a media element that has its own src.
+		if (tag === "IMG" && media.parentElement?.tagName === "PICTURE" && media.parentElement.querySelector("source[srcset]")) return null;
+		if (tag === "SOURCE" && media.parentElement?.hasAttribute("src")) return null;
+		const decode = (s: string) => { try { return decodeURI(s); } catch { return s; } };
+		// file:/// URLs inside the vault (Obsidian rewrites them to the file for img, audio, video, source, iframe).
+		if (src.startsWith("file:///")) {
+			const base = (this.app.vault.adapter as FileSystemAdapter).getBasePath?.();
+			if (!base) return null;
+			const abs = decode(src.slice(7)).normalize("NFC");
+			const prefix = `${base.normalize("NFC")}/`;
+			if (!abs.toLowerCase().startsWith(prefix.toLowerCase())) return null;
+			const file = this.app.vault.getAbstractFileByPath(normalizePath(abs.slice(prefix.length)));
+			return file instanceof TFile ? file : null;
+		}
+		if (tag === "IFRAME") return null;
+		// Obsidian's own rule: relative ("./", "../") or anything without a scheme, resolved as a whole (no #split).
+		if (!(src.startsWith("./") || src.startsWith("../") || !src.includes(":"))) return null;
+		return this.app.metadataCache.getFirstLinkpathDest(obsidianLinktext(decode(src)), sourcePath);
 	}
 
 	get downloadMode(): DownloadMode {
@@ -393,7 +415,15 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 	/** Placeholders still waiting for their file, in notes that are still open (stale ones are retired). */
 	private pendingPlaceholders(): CloudPlaceholder[] {
-		return [...this.placeholders].filter((p) => p.pending && this.isAlive(p));
+		return [...this.placeholders].filter((p) => {
+			if (!p.pending) return false;
+			// HTML placeholders aren't components Obsidian unloads, so off the page we can't tell "scrolled away" (Live
+			// Preview caches its HTML blocks) from "gone": skip them without retiring, unless a reading view holds them.
+			if (p.containerEl.hasClass("link-rescue-html-holder") && !p.containerEl.isConnected && !this.readingViewOf(p)) {
+				return false;
+			}
+			return this.isAlive(p);
+		});
 	}
 
 	/**
@@ -493,6 +523,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		for (const ref of cache?.embeds ?? []) {
 			const f = this.app.metadataCache.getFirstLinkpathDest(obsidianLinktext(splitSubpath(ref.link).path), note.path);
 			if (f && f.extension !== "md") files.add(f);
+		}
+		// Also files held back in HTML (<img src>, <video>…) shown in this note's view.
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (view?.file === note) {
+			for (const p of this.pendingPlaceholders()) if (view.containerEl.contains(p.containerEl)) files.add(p.file);
 		}
 		const cloud = [...files].filter((f) => this.icloud.isDatalessSync(f.path));
 		if (!cloud.length) {

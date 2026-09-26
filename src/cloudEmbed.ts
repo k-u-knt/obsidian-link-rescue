@@ -41,6 +41,8 @@ export class CloudPlaceholder {
 	private started?: Promise<void>;
 	private revealing?: Promise<void>;
 	private hoverTimer: number | null = null;
+	/** The pointer came onto the placeholder from outside it (not: the placeholder appeared under it). */
+	private movedOnto = false;
 
 	constructor(
 		private host: CloudHost,
@@ -64,13 +66,25 @@ export class CloudPlaceholder {
 		this.box.addEventListener("mousemove", (evt: MouseEvent) => {
 			if (this.host.downloadMode !== "hover" || this.state !== "idle") return;
 			if (evt.movementX === 0 && evt.movementY === 0) return;
+			if (!this.movedOnto) {
+				// Where was the pointer before this move? If already inside, the placeholder appeared (or scrolled)
+				// under a resting pointer and this is just a wobble: it has to leave and come back to count.
+				const r = this.box.getBoundingClientRect();
+				const x = evt.clientX - evt.movementX;
+				const y = evt.clientY - evt.movementY;
+				if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return;
+				this.movedOnto = true;
+			}
 			this.cancelHover();
 			this.hoverTimer = window.setTimeout(() => {
 				this.hoverTimer = null;
 				if (this.host.downloadMode === "hover" && this.state === "idle" && this.box.matches(":hover")) void this.start();
 			}, HOVER_DELAY_MS);
 		});
-		this.box.addEventListener("mouseleave", () => this.cancelHover());
+		this.box.addEventListener("mouseleave", () => {
+			this.movedOnto = false;
+			this.cancelHover();
+		});
 		this.render();
 	}
 
@@ -215,7 +229,10 @@ export function gateMediaEmbed(host: CloudHost, ctx: EmbedContext, file: TFile, 
  */
 export function gateHtmlMedia(host: CloudHost, el: HTMLElement, file: TFile, src: string, resourcePath: () => string) {
 	const media = el.tagName === "SOURCE" ? (el.parentElement ?? el) : el;
-	el.removeAttribute("src");
+	// An empty src (rather than none) makes a pending <img> fire "error", so Obsidian's own image post-processor,
+	// which waits for load/error, finishes and the reading view completes its render.
+	if (el.tagName === "IMG") el.setAttribute("src", "");
+	else el.removeAttribute("src");
 	el.setAttr("data-link-rescue-src", src);
 	media.addClass("link-rescue-hidden");
 	const holder = createSpan({ cls: "link-rescue-html-holder" });
@@ -231,6 +248,8 @@ export function gateHtmlMedia(host: CloudHost, el: HTMLElement, file: TFile, src
 		}
 	});
 	void placeholder.begin();
+	// The element is still detached while post-processors run; once inserted, an Export to PDF (.print) needs the file.
+	holder.onNodeInserted(() => { if (holder.closest(".print")) void placeholder.start(); }, true);
 }
 
 /** Stand-in used for PDFs, whose viewer builds itself inside the container: swapped for the real embed later. */
