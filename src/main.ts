@@ -20,9 +20,9 @@ interface LinkRescueSettings {
 	/** Repair a note's broken links automatically when it is opened. */
 	autoRepair: boolean;
 	/**
-	 * macOS: when files that are only in iCloud get downloaded. Never because a note opened or scrolled into view
-	 * (protects local storage): "hover" ("On hover", the default) when the pointer rests on the placeholder, "manual" ("On click")
-	 * only when the placeholder is clicked.
+	 * macOS: when files that are only in iCloud get downloaded (protects local storage): "manual" ("On click") when the
+	 * placeholder is clicked, "hover" ("On hover", the default) when the pointer rests on it, "visible" ("When visible")
+	 * when it has been on screen for a moment.
 	 */
 	downloadMode: DownloadMode;
 	/** Show a message when files have been downloaded from iCloud. */
@@ -121,11 +121,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 		const rebuild = debounce(() => this.rebuildIndex(), 300, true);
 		this.app.workspace.onLayoutReady(() => {
-			if (enabledLate) {
-				for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-					void (leaf as unknown as { rebuildView?: () => Promise<void> }).rebuildView?.();
-				}
-			}
+			if (enabledLate) this.rebuildViewsWithCloudFiles();
 			if (this.migratedToHover) {
 				void this.saveSettings();
 				if (this.icloud.available) new Notice("Link Rescue: iCloud files now download only on hover (or, if you " +
@@ -631,6 +627,27 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			// Only Obsidian-normalized paths: passing an on-disk name with U+202F would create a duplicate entry.
 			if (!this.app.vault.getAbstractFileByPath(real)) await update.call(this.app.vault.adapter, real).catch(() => undefined);
 		}
+	}
+
+	/**
+	 * Enabled or updated while notes are open: their embeds were rendered without us (or by the previous version, whose
+	 * placeholders are now inert). Re-open the notes and canvases that show files only in the cloud. Only those: re-opening
+	 * an editor clears its undo history.
+	 */
+	private rebuildViewsWithCloudFiles() {
+		if (!this.icloud.available) return;
+		const rebuild = (leaf: WorkspaceLeaf) => void (leaf as unknown as { rebuildView?: () => Promise<void> }).rebuildView?.();
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			const note = (leaf.view as MarkdownView).file;
+			if (!note) continue;
+			const embeds = this.app.metadataCache.getFileCache(note)?.embeds ?? [];
+			const cloud = embeds.some((ref) => {
+				const f = this.app.metadataCache.getFirstLinkpathDest(obsidianLinktext(splitSubpath(ref.link).path), note.path);
+				return !!f && f.extension !== "md" && this.icloud.isDatalessSync(f.path);
+			});
+			if (cloud || leaf.view.containerEl.querySelector(".link-rescue-cloud-embed")) rebuild(leaf);
+		}
+		for (const leaf of this.app.workspace.getLeavesOfType("canvas")) rebuild(leaf);
 	}
 
 	/** iPhone/iPad: keep the placeholder index current so "not downloaded here" isn't mistaken for "missing". */

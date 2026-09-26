@@ -112,7 +112,9 @@ function pointerTrack(doc: Document): PointerTrack {
 	// Clicks on a placeholder are handled at the very top of the window (capture), before editors, Live Preview
 	// widgets or other plugins can swallow them; the download starts on release over the same placeholder.
 	const boxOf = (e: Event) => {
-		const el = e.target instanceof Element ? e.target.closest(".link-rescue-cloud-embed") : null;
+		// Duck-typed rather than `instanceof Element`, which fails for nodes created by a popout window's realm.
+		const t = e.target as { closest?: (sel: string) => Element | null } | null;
+		const el = t && typeof t.closest === "function" ? t.closest(".link-rescue-cloud-embed") : null;
 		return el ? boxes.get(el) ?? null : null;
 	};
 	let pressed: CloudPlaceholder | null = null;
@@ -124,19 +126,22 @@ function pointerTrack(doc: Document): PointerTrack {
 		pressed = e.button === 0 ? p : null;
 	};
 	const onUp = (e: PointerEvent) => {
+		const was = pressed;
+		pressed = null;
+		// Only a press that began on this same placeholder is ours; releases of other presses (a text selection or a
+		// drag ending here) go on to their owners untouched.
 		const p = boxOf(e);
-		if (!p) return;
+		if (!p || was !== p) return;
 		e.preventDefault();
 		e.stopPropagation();
-		if (e.button === 0 && pressed === p) p.activate();
-		pressed = null;
+		if (e.button === 0) p.activate();
 	};
 	const onMouse = (e: MouseEvent) => {
 		if (!boxOf(e)) return;
 		e.preventDefault();
 		e.stopPropagation();
 	};
-	const mouseTypes = ["mousedown", "mouseup", "click", "dblclick", "auxclick"];
+	const mouseTypes = ["mousedown", "click", "dblclick", "auxclick"];
 	const track: PointerTrack = {
 		scrolledAt: 0,
 		lostAt: 0,
@@ -184,9 +189,9 @@ export function disposePointerTracks() {
 }
 
 /**
- * Shown in an embed's container while its file is only in the cloud. Downloads the file right away
- * (automatic mode), when clicked (manual mode), or always when the note is being exported, and then
- * calls `reveal` to let Obsidian's own embed display the file.
+ * Shown in an embed's container while its file is only in the cloud. Downloads the file when clicked, when the pointer
+ * rests on it ("On hover"), when it has been on screen for a moment ("When visible"), or always when the note is
+ * being exported, and then calls `reveal` to let Obsidian's own embed display the file.
  */
 export class CloudPlaceholder {
 	private state: State = "idle";
@@ -217,7 +222,7 @@ export class CloudPlaceholder {
 		boxes.set(this.box, this);
 		// "On hover": download only when the user moves the pointer onto this file and rests it there. Only real
 		// movement counts: the browser also reports "pointer entered" when a note opens or scrolls under a pointer
-		// that isn't moving, and opening a note must never download anything.
+		// that isn't moving.
 		this.box.addEventListener("mousemove", (evt: MouseEvent) => {
 			if (this.host.downloadMode !== "hover" || this.state !== "idle") return;
 			if (evt.movementX === 0 && evt.movementY === 0) return;
@@ -290,8 +295,10 @@ export class CloudPlaceholder {
 		if (!IO) return;
 		this.io = new IO((entries) => {
 			const e = entries[entries.length - 1];
+			const was = this.inView;
 			this.inView = e.isIntersecting && (e.intersectionRatio >= 0.5 || e.intersectionRect.height >= 120);
-			this.onVisibility();
+			// Only a change between on and off screen matters (not every threshold crossing while it stays on screen).
+			if (this.inView !== was || !this.inView) this.onVisibility();
 		}, { threshold: [0, 0.25, 0.5, 0.75, 1] });
 		this.io.observe(this.box);
 	}
@@ -357,7 +364,7 @@ export class CloudPlaceholder {
 		this.entry = null;
 		this.cancelHover();
 		if (this.state === "idle" || this.state === "failed") this.render();
-		// Switching to "When visible" applies to placeholders already on screen.
+		// Switching to "When visible" applies to placeholders already on screen (restart the countdown).
 		this.onVisibility();
 	}
 
@@ -418,7 +425,8 @@ export class CloudPlaceholder {
 		this.stopWatching();
 		this.state = "retired";
 		this.host.untrack(this);
-		if (message && this.box.isConnected) {
+		// Written even while detached (scrolled away), so it doesn't look live when it comes back into view.
+		if (message) {
 			this.box.empty();
 			this.box.addClass("is-retired");
 			this.box.createDiv({ cls: "link-rescue-cloud-status", text: message });
