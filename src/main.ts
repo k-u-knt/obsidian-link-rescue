@@ -21,7 +21,7 @@ interface LinkRescueSettings {
 	autoRepair: boolean;
 	/**
 	 * macOS: when files that are only in iCloud get downloaded. Never because a note opened or scrolled into view
-	 * (protects local storage): "hover" (Automatic, the default) when the pointer rests on the placeholder, "manual"
+	 * (protects local storage): "hover" ("On hover", the default) when the pointer rests on the placeholder, "manual" ("On click")
 	 * only when the placeholder is clicked.
 	 */
 	downloadMode: DownloadMode;
@@ -121,8 +121,8 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		this.app.workspace.onLayoutReady(() => {
 			if (this.migratedToHover) {
 				void this.saveSettings();
-				if (this.icloud.available) new Notice("Link Rescue: iCloud files now download only when you point at them " +
-					"(or, in Manual mode, click them), so opening a note no longer fills local storage.", 12000);
+				if (this.icloud.available) new Notice("Link Rescue: iCloud files now download only on hover (or, if you " +
+					"choose, on click), so opening a note no longer fills local storage.", 12000);
 			}
 			this.rebuildIndex();
 			// Registered after layout-ready so the initial vault load doesn't fire "create" for every file.
@@ -176,7 +176,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		});
 		this.addCommand({
 			id: "toggle-auto-download",
-			name: "Switch cloud downloads between automatic (on hover) and manual (on click)",
+			name: "Switch cloud downloads between on hover and on click",
 			checkCallback: (checking) => {
 				if (!this.icloud.available) return false;
 				if (!checking) void this.setDownloadMode(this.settings.downloadMode === "hover" ? "manual" : "hover");
@@ -217,7 +217,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 	async loadSettings() {
 		const data = (await this.loadData()) ?? {};
-		// "Download as soon as a note shows it" no longer exists (it filled local storage): it becomes Automatic (on hover).
+		// "Download as soon as a note shows it" no longer exists (it filled local storage): it becomes "On hover".
 		// 0.1.x users had it as their default, so tell them once.
 		if (data.downloadMode === "auto") {
 			data.downloadMode = "hover";
@@ -493,12 +493,12 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		this.pendingPlaceholders().forEach((p) => p.refresh());
 		const where = this.cloudName;
 		new Notice(mode === "hover"
-			? `Link Rescue: ${where} downloads are automatic: a file downloads when you point at its placeholder. ` +
+			? `Link Rescue: ${where} files now download on hover: rest the pointer on a placeholder. ` +
 				"Opening or scrolling a note downloads nothing."
-			: `Link Rescue: ${where} downloads are manual: a file downloads only when you click its placeholder.`);
+			: `Link Rescue: ${where} files now download on click: click a placeholder. Hovering downloads nothing.`);
 	}
 
-	/** In manual mode, say once per note how many of its files are still only in the cloud. */
+	/** In "on click" mode, say once per note how many of its files are still only in the cloud. */
 	private reportCloudFiles(note: TFile | null) {
 		// Only in manual mode: in hover mode the placeholders say what to do, and nothing needs a click.
 		if (!note || note.extension !== "md" || !this.icloud.available || this.downloadMode !== "manual") return;
@@ -1121,13 +1121,13 @@ class LinkRescueSettingTab extends PluginSettingTab {
 			"instead of Obsidian's \"Click to create\" making an empty note.");
 		if (this.plugin.icloud.available) {
 			new Setting(containerEl)
-				.setName("iCloud downloads")
+				.setName("Download iCloud files")
 				.setDesc("For images, PDFs, audio and video that are still only in iCloud. Opening or scrolling a note never " +
-					"downloads them (protects local storage); each shows a placeholder. Automatic: a file downloads when you " +
-					"point at its placeholder. Manual: only when you click it.")
+					"downloads them (protects local storage); each shows a placeholder until you download it. On hover: " +
+					"rest the pointer on the placeholder. On click: click the placeholder.")
 				.addDropdown((d) => d
-					.addOption("hover", "Automatic (when you point at it)")
-					.addOption("manual", "Manual (when you click it)")
+					.addOption("hover", "On hover")
+					.addOption("manual", "On click")
 					.setValue(this.plugin.settings.downloadMode)
 					.onChange((v) => this.plugin.setDownloadMode(v as DownloadMode)));
 			// `git status` (e.g. from the Git plugin) re-reads files whose stat changed, which downloads evicted files.

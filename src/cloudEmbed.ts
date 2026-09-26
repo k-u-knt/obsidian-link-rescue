@@ -14,7 +14,8 @@ export type EmbedCreator = (ctx: EmbedContext, file: TFile, subpath?: string) =>
 
 /**
  * When a file that is only in the cloud gets downloaded. Never because a note opened or scrolled into view:
- * "hover" (shown as Automatic) when the user points at its placeholder, "manual" only when the user clicks it.
+ * "hover" (shown as "On hover") when the user rests the pointer on its placeholder, "manual" ("On click") only when
+ * the user clicks it.
  */
 export type DownloadMode = "hover" | "manual";
 

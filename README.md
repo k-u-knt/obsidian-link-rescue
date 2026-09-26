@@ -46,8 +46,8 @@ Unicode normalization form.
 
 - **iCloud files (macOS).** Images, PDFs, audio and video that are still only in iCloud show a placeholder
   with the file's size. Opening or scrolling a note never downloads them, which keeps local storage free.
-  **Automatic** (default) downloads a file when you move the pointer onto its placeholder and rest it there;
-  **Manual** downloads it only when you click the placeholder. A message says when files have been downloaded,
+  Choose when a file downloads: **On hover** (default), when you move the pointer onto its placeholder and rest
+  it there; or **On click**, only when you click the placeholder. A message says when files have been downloaded,
   and the status bar shows downloads in progress.
 - **Vault scan.** The command *Find and repair broken links in vault* lists every repairable link, and the
   empty notes that "Click to create" left behind, and fixes them in one go.
@@ -57,7 +57,7 @@ Unicode normalization form.
 - **Repair broken links in current note**
 - **Find and repair broken links in vault**
 - **Download cloud files embedded in current note** (macOS)
-- **Switch cloud downloads between automatic (on hover) and manual (on click)** (macOS)
+- **Switch cloud downloads between on hover and on click** (macOS)
 
 ## Settings
 
@@ -65,7 +65,7 @@ Unicode normalization form.
 |---|---|
 | Repair links when a note opens | on |
 | Open the matching file instead of creating an empty note | on |
-| iCloud downloads: Automatic (on hover) / Manual (on click) (macOS) | Automatic |
+| Download iCloud files: On hover / On click (macOS) | On hover |
 | Notify about iCloud downloads (macOS) | on |
 | Show status icons | on |
 
