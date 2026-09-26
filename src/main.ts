@@ -386,6 +386,10 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 	/** Resolve an HTML src the way Obsidian does (fixFileLinks for relative paths, its app:// handler for file:///). */
 	srcTarget(src: string, tag: string, sourcePath: string): TFile | null {
+		// app:// resource URLs written into rendered markdown by other code (e.g. a DataviewJS view building
+		// `<img src="${app.vault.getResourcePath(file)}">`, Copilot chat messages): the same file as file:///.
+		const prefix = Platform.resourcePathPrefix;
+		if (prefix && src.startsWith(prefix)) src = `file:///${src.slice(prefix.length)}`;
 		if (src.startsWith("file:///")) {
 			const base = (this.app.vault.adapter as FileSystemAdapter).getBasePath?.();
 			if (!base) return null;

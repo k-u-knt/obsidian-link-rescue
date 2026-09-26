@@ -238,6 +238,10 @@ export class CloudPlaceholder {
 
 	/** Re-draw after the download mode changed (the hint text depends on it). */
 	refresh() {
+		// A move onto the placeholder seen under the previous mode doesn't count under the new one.
+		this.movedOnto = false;
+		this.entry = null;
+		this.cancelHover();
 		if (this.state === "idle" || this.state === "failed") this.render();
 	}
 
