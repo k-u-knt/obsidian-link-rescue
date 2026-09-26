@@ -19,6 +19,10 @@ export type DownloadMode = "auto" | "hover" | "manual";
 const HOVER_DELAY_MS = 350;
 /** How far the pointer must travel from where it was seen outside a placeholder (skips hand jitter at an edge). */
 const MIN_TRAVEL_PX = 4;
+/** The move onto a placeholder must follow the previous pointer position within this time (continuous motion). */
+const MAX_GAP_MS = 100;
+/** Longest single step onto a placeholder accepted after a pause. */
+const MAX_STEP_PX = 32;
 
 export interface CloudHost {
 	readonly downloadMode: DownloadMode;
@@ -43,6 +47,10 @@ interface PointerTrack {
 	scrolledAt: number;
 	/** When the document last lost sight of the pointer (it left the view, a native menu opened, the window changed). */
 	lostAt: number;
+	/** When content last moved under the pointer by layout (an embed above resized itself or went away). */
+	shiftedAt: number;
+	/** Pick up layout shifts the browser has recorded but not yet delivered. */
+	syncShifts: () => void;
 	dispose: () => void;
 }
 const tracks = new Map<Document, PointerTrack>();
@@ -61,16 +69,33 @@ function pointerTrack(doc: Document): PointerTrack {
 	const lose = () => { track.prev = track.last = undefined; track.lostAt = (win ?? window).performance.now(); };
 	const onOut = (e: PointerEvent) => { if (!e.relatedTarget) lose(); };
 	const win = doc.defaultView;
+	// Content moves under a still pointer when something above it resizes itself or goes away (a tweet reporting its
+	// height, an embed's line deleted): positions seen before that say nothing about what is under the pointer now.
+	let shifts: PerformanceObserver | undefined;
+	const noteShifts = (entries: PerformanceEntry[]) => { for (const e of entries) track.shiftedAt = Math.max(track.shiftedAt, e.startTime); };
+	try {
+		const PO = (win as unknown as { PerformanceObserver?: typeof PerformanceObserver } | null)?.PerformanceObserver;
+		if (PO?.supportedEntryTypes?.includes("layout-shift")) {
+			shifts = new PO((list) => noteShifts(list.getEntries()));
+			shifts.observe({ type: "layout-shift" });
+		}
+	} catch { shifts = undefined; }
+	// Zoom (Cmd+= / Cmd+-) and window resizes move a still pointer in page coordinates without any pointer event.
+	const onResize = () => lose();
 	const track: PointerTrack = {
 		scrolledAt: 0,
 		lostAt: 0,
+		shiftedAt: 0,
+		syncShifts: () => { if (shifts) noteShifts(shifts.takeRecords()); },
 		dispose: () => {
+			shifts?.disconnect();
 			doc.removeEventListener("pointermove", onMove, true);
 			doc.removeEventListener("scroll", onScroll, true);
 			doc.removeEventListener("pointerout", onOut, true);
 			doc.removeEventListener("contextmenu", lose, true);
 			win?.removeEventListener("blur", lose);
 			win?.removeEventListener("focus", lose);
+			win?.removeEventListener("resize", onResize);
 		},
 	};
 	doc.addEventListener("pointermove", onMove, true);
@@ -79,6 +104,7 @@ function pointerTrack(doc: Document): PointerTrack {
 	doc.addEventListener("contextmenu", lose, true);
 	win?.addEventListener("blur", lose);
 	win?.addEventListener("focus", lose);
+	win?.addEventListener("resize", onResize);
 	tracks.set(doc, track);
 	return track;
 }
@@ -139,7 +165,16 @@ export class CloudPlaceholder {
 				// scroll, or already inside it: the placeholder appeared, scrolled or was dropped under the pointer and
 				// this is a wobble. The pointer has to be seen outside it first.
 				const prev = track.prev;
-				if (!prev || prev.t < this.shownAt || prev.t < track.scrolledAt) return;
+				track.syncShifts();
+				if (!prev || prev.t < this.shownAt || prev.t < track.scrolledAt || prev.t <= track.shiftedAt) return;
+				// A position seen a while ago says nothing about where the pointer has been since: inside an embedded
+				// video, tweet or web page (this document doesn't see it there), or the window moved or zoomed under it.
+				// After a pause, only a single short step that the browser also reports as this move counts (a pointer
+				// parked just outside the edge).
+				if (evt.timeStamp - prev.t > MAX_GAP_MS) {
+					const dx = evt.clientX - prev.x, dy = evt.clientY - prev.y;
+					if (Math.hypot(dx, dy) > MAX_STEP_PX || Math.abs(dx - evt.movementX) > 2 || Math.abs(dy - evt.movementY) > 2) return;
+				}
 				const r = this.box.getBoundingClientRect();
 				if (prev.x >= r.left && prev.x <= r.right && prev.y >= r.top && prev.y <= r.bottom) return;
 				this.movedOnto = true;
@@ -163,6 +198,15 @@ export class CloudPlaceholder {
 				if (Math.abs(r.left - was.left) > 1 || Math.abs(r.top - was.top) > 1) return;
 				// What is under the pointer now (not a modal or menu that opened over it, not other content)?
 				if (!this.box.contains(this.box.doc.elementFromPoint(last.x, last.y))) return;
+				// Last seen heading into an embedded web page/video? This document doesn't see the pointer there.
+				const before = track.prev;
+				if (before) {
+					const dx = last.x - before.x, dy = last.y - before.y;
+					for (let k = 1; k <= 3; k++) {
+						const ahead = this.box.doc.elementFromPoint(last.x + dx * k, last.y + dy * k);
+						if (ahead?.closest("iframe, webview, embed, object")) return;
+					}
+				}
 				void this.start();
 			}, HOVER_DELAY_MS);
 		});
