@@ -3,7 +3,7 @@ import {
 	setTooltip,
 } from "obsidian";
 import { around } from "monkey-around";
-import { CloudEmbed, CloudHost, CloudPlaceholder, EmbedCreator, formatSize, gateMediaEmbed } from "./cloudEmbed";
+import { CloudEmbed, CloudHost, CloudPlaceholder, DownloadMode, EmbedCreator, formatSize, gateMediaEmbed } from "./cloudEmbed";
 import { DiagnosticsModal } from "./diagnostics";
 import { ICloud } from "./icloud";
 import { IosCloud, isHiddenPath } from "./icloudIos";
@@ -12,12 +12,13 @@ import {
 	rewriteLinkpath, splitSubpath,
 } from "./matching";
 
-type DownloadMode = "auto" | "manual";
-
 interface LinkRescueSettings {
 	/** Repair a note's broken links automatically when it is opened. */
 	autoRepair: boolean;
-	/** macOS: download iCloud-only files as soon as a note shows them ("auto"), or only when clicked ("manual"). */
+	/**
+	 * macOS: when files that are only in iCloud get downloaded: when the pointer rests on them ("hover", the default,
+	 * so opening a note never fills local storage), as soon as a note shows them ("auto"), or on click ("manual").
+	 */
 	downloadMode: DownloadMode;
 	/** Show a message when files have been downloaded from iCloud. */
 	notifyDownloads: boolean;
@@ -28,7 +29,7 @@ interface LinkRescueSettings {
 
 const DEFAULT_SETTINGS: LinkRescueSettings = {
 	autoRepair: true,
-	downloadMode: "auto",
+	downloadMode: "hover",
 	notifyDownloads: true,
 	showBadges: true,
 	safeOpen: true,
@@ -161,10 +162,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		});
 		this.addCommand({
 			id: "toggle-auto-download",
-			name: "Switch cloud downloads between automatic and manual",
+			name: "Cycle cloud download mode (on hover → automatic → manual)",
 			checkCallback: (checking) => {
 				if (!this.icloud.available) return false;
-				if (!checking) this.setDownloadMode(this.settings.downloadMode === "auto" ? "manual" : "auto");
+				const next: Record<DownloadMode, DownloadMode> = { hover: "auto", auto: "manual", manual: "hover" };
+				if (!checking) this.setDownloadMode(next[this.settings.downloadMode]);
 				return true;
 			},
 		});
@@ -203,7 +205,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		const data = (await this.loadData()) ?? {};
 		this.settings = {
 			autoRepair: data.autoRepair ?? DEFAULT_SETTINGS.autoRepair,
-			downloadMode: data.downloadMode === "manual" || data.downloadMode === "auto"
+			downloadMode: ["auto", "hover", "manual"].includes(data.downloadMode)
 				? data.downloadMode
 				: data.autoDownload === false ? "manual" : DEFAULT_SETTINGS.downloadMode,
 			notifyDownloads: data.notifyDownloads ?? DEFAULT_SETTINGS.notifyDownloads,
@@ -324,8 +326,8 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		}
 	}
 
-	get autoDownload(): boolean {
-		return this.settings.downloadMode === "auto";
+	get downloadMode(): DownloadMode {
+		return this.settings.downloadMode;
 	}
 
 	get cloudName(): string {
@@ -386,17 +388,21 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		await this.saveSettings();
 		// Placeholders already on screen follow the new mode right away.
 		const waiting = this.pendingPlaceholders();
-		if (mode === "auto") waiting.forEach((p) => p.start());
+		waiting.forEach((p) => p.refresh());
+		if (mode === "auto") waiting.forEach((p) => void p.start());
 		const files = new Set(waiting.map((p) => p.file.path)).size;
 		const where = this.cloudName;
 		new Notice(mode === "auto"
 			? `Link Rescue: ${where} downloads are automatic.${files ? ` Downloading ${files} file${files === 1 ? "" : "s"} now…` : ""}`
-			: `Link Rescue: ${where} downloads are manual. Files still in ${where} show a placeholder; click it to download.`);
+			: mode === "hover"
+				? `Link Rescue: ${where} files download when you point at them. Opening a note downloads nothing.`
+				: `Link Rescue: ${where} downloads are manual. Files still in ${where} show a placeholder; click it to download.`);
 	}
 
 	/** In manual mode, say once per note how many of its files are still only in the cloud. */
 	private reportCloudFiles(note: TFile | null) {
-		if (!note || note.extension !== "md" || !this.icloud.available || this.autoDownload) return;
+		// Only in manual mode: in hover mode the placeholders say what to do, and nothing needs a click.
+		if (!note || note.extension !== "md" || !this.icloud.available || this.downloadMode !== "manual") return;
 		if (this.reportedNotes.has(note.path)) return;
 		// After the embeds have been created (placeholders register themselves as they load).
 		this.later(() => {
@@ -1002,9 +1008,11 @@ class LinkRescueSettingTab extends PluginSettingTab {
 		if (this.plugin.icloud.available) {
 			new Setting(containerEl)
 				.setName("iCloud downloads")
-				.setDesc("For images, PDFs, audio and video that are still only in iCloud. Automatic: download as soon as a " +
-					"note shows them. Manual: show a placeholder and download only when you click it.")
+				.setDesc("For images, PDFs, audio and video that are still only in iCloud. On hover: opening a note " +
+					"downloads nothing; a file downloads when you rest the pointer on its placeholder (protects local storage). " +
+					"Automatic: download as soon as a note shows them. Manual: download only when you click.")
 				.addDropdown((d) => d
+					.addOption("hover", "On hover (default)")
 					.addOption("auto", "Automatic")
 					.addOption("manual", "Manual (click to download)")
 					.setValue(this.plugin.settings.downloadMode)

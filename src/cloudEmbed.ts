@@ -12,8 +12,14 @@ export interface EmbedComponent extends Component {
 
 export type EmbedCreator = (ctx: EmbedContext, file: TFile, subpath?: string) => EmbedComponent | null;
 
+/** When a file that is only in the cloud gets downloaded. */
+export type DownloadMode = "auto" | "hover" | "manual";
+
+/** How long the pointer must rest on a placeholder before "hover" mode downloads it (skips passing sweeps). */
+const HOVER_DELAY_MS = 350;
+
 export interface CloudHost {
-	readonly autoDownload: boolean;
+	readonly downloadMode: DownloadMode;
 	/** "iCloud", or "the cloud" for other File Provider services. */
 	readonly cloudName: string;
 	/** Download the file; once done, the host calls finish() on every placeholder of that file. */
@@ -34,6 +40,7 @@ export class CloudPlaceholder {
 	private box: HTMLElement;
 	private started?: Promise<void>;
 	private revealing?: Promise<void>;
+	private hoverTimer: number | null = null;
 
 	constructor(
 		private host: CloudHost,
@@ -51,7 +58,27 @@ export class CloudPlaceholder {
 		};
 		this.box.addEventListener("click", swallow);
 		this.box.addEventListener("mousedown", swallow);
+		// "On hover": download only when the pointer rests on this file, never just because a note was opened.
+		this.box.addEventListener("mouseenter", () => {
+			if (this.host.downloadMode !== "hover" || this.state !== "idle") return;
+			this.cancelHover();
+			this.hoverTimer = window.setTimeout(() => {
+				this.hoverTimer = null;
+				if (this.host.downloadMode === "hover" && this.state === "idle" && this.box.matches(":hover")) this.start();
+			}, HOVER_DELAY_MS);
+		});
+		this.box.addEventListener("mouseleave", () => this.cancelHover());
 		this.render();
+	}
+
+	private cancelHover() {
+		if (this.hoverTimer !== null) window.clearTimeout(this.hoverTimer);
+		this.hoverTimer = null;
+	}
+
+	/** Re-draw after the download mode changed (the hint text depends on it). */
+	refresh() {
+		if (this.state === "idle" || this.state === "failed") this.render();
 	}
 
 	get pending(): boolean {
@@ -67,12 +94,13 @@ export class CloudPlaceholder {
 		this.host.track(this);
 		// Export to PDF waits for loadFile(); download so the export shows the file, not the placeholder.
 		if (this.containerEl.closest(".print")) return this.start();
-		if (this.host.autoDownload) return Promise.race([this.start(), sleep(5000)]);
+		if (this.host.downloadMode === "auto") return Promise.race([this.start(), sleep(5000)]);
 		return Promise.resolve();
 	}
 
 	/** Download the file, then show it. Resolves once Obsidian's embed has loaded it. */
 	start(): Promise<void> {
+		this.cancelHover();
 		if (this.state === "retired") return Promise.resolve();
 		if (this.state === "done") return this.revealing ?? Promise.resolve();
 		if (this.state === "downloading" && this.started) return this.started;
@@ -106,6 +134,7 @@ export class CloudPlaceholder {
 	/** Stop for good: the embed was unloaded, or the plugin is being disabled (then show `message`). */
 	retire(message?: string) {
 		if (this.state === "done" || this.state === "retired") return;
+		this.cancelHover();
 		this.state = "retired";
 		this.host.untrack(this);
 		if (message && this.box.isConnected) {
@@ -132,7 +161,8 @@ export class CloudPlaceholder {
 				? `Downloading from ${where} (${size})…`
 				: this.state === "failed"
 					? `Download from ${where} failed. Click to try again.`
-					: `In ${where}, not downloaded (${size}). Click to download.`,
+					: `In ${where}, not downloaded (${size}). ${this.host.downloadMode === "hover"
+						? "Point at it to download." : "Click to download."}`,
 		});
 	}
 }
