@@ -137,9 +137,13 @@ function pointerTrack(doc: Document): PointerTrack {
 		if (e.button === 0) p.activate();
 	};
 	const onMouse = (e: MouseEvent) => {
-		if (!boxOf(e)) return;
+		const p = boxOf(e);
+		if (!p) return;
 		e.preventDefault();
 		e.stopPropagation();
+		// Safety net if the release wasn't seen as ours (e.g. pointer capture retargeted it): a click on the
+		// placeholder also downloads. activate() does nothing once a download has started, so both firing is harmless.
+		if (e.type === "click" && e.button === 0) p.activate();
 	};
 	const mouseTypes = ["mousedown", "click", "dblclick", "auxclick"];
 	const track: PointerTrack = {
