@@ -73,7 +73,7 @@ Unicode normalization form.
 
 The plugin holds back embeds (`![[…]]`, `![](…)`) and HTML `<img>`/`<video>`/`<audio>` in notes. A few places in
 Obsidian load files by other routes and can still download a cloud-only file: the image lightbox, the Live Preview
-image-edit popup, and Bases card covers. In canvas, select a card first; Obsidian covers unselected cards.
+image-edit popup, and Bases image values and card covers. In canvas, select a card first; Obsidian covers unselected cards.
 
 ### Git users
 

@@ -31,6 +31,48 @@ export interface CloudHost {
 type State = "idle" | "downloading" | "failed" | "done" | "retired";
 
 /**
+ * Last two mouse positions per document (fractional, from pointermove), and when content last scrolled under them.
+ * Positions come from the document itself rather than from `movementX/Y`, which the browser may compute from a stale
+ * position (after a drag session, or after the pointer was over an embedded web page).
+ */
+interface PointerTrack {
+	prev?: { x: number; y: number; t: number };
+	last?: { x: number; y: number; t: number };
+	scrolledAt: number;
+	dispose: () => void;
+}
+const tracks = new Map<Document, PointerTrack>();
+
+function pointerTrack(doc: Document): PointerTrack {
+	const known = tracks.get(doc);
+	if (known) return known;
+	const onMove = (e: PointerEvent) => {
+		if (e.pointerType !== "mouse") return;
+		track.prev = track.last;
+		track.last = { x: e.clientX, y: e.clientY, t: e.timeStamp };
+	};
+	// Scrolling moves content under a still pointer: positions seen before it say nothing about what's under it now.
+	const onScroll = (e: Event) => { track.scrolledAt = e.timeStamp; };
+	const track: PointerTrack = {
+		scrolledAt: 0,
+		dispose: () => {
+			doc.removeEventListener("pointermove", onMove, true);
+			doc.removeEventListener("scroll", onScroll, true);
+		},
+	};
+	doc.addEventListener("pointermove", onMove, true);
+	doc.addEventListener("scroll", onScroll, true);
+	tracks.set(doc, track);
+	return track;
+}
+
+/** Remove the document listeners (plugin unload). */
+export function disposePointerTracks() {
+	tracks.forEach((t) => t.dispose());
+	tracks.clear();
+}
+
+/**
  * Shown in an embed's container while its file is only in the cloud. Downloads the file right away
  * (automatic mode), when clicked (manual mode), or always when the note is being exported, and then
  * calls `reveal` to let Obsidian's own embed display the file.
@@ -43,6 +85,8 @@ export class CloudPlaceholder {
 	private hoverTimer: number | null = null;
 	/** The pointer came onto the placeholder from outside it (not: the placeholder appeared under it). */
 	private movedOnto = false;
+	/** When this placeholder was last inserted or re-shown; pointer positions seen before then don't count. */
+	private shownAt = 0;
 
 	constructor(
 		private host: CloudHost,
@@ -67,21 +111,32 @@ export class CloudPlaceholder {
 			if (this.host.downloadMode !== "hover" || this.state !== "idle") return;
 			if (evt.movementX === 0 && evt.movementY === 0) return;
 			if (!this.movedOnto) {
-				// Where was the pointer before this move? If already inside, the placeholder appeared (or scrolled)
-				// under a resting pointer and this is just a wobble: it has to leave and come back to count.
+				// Where was the pointer just before this move? Unknown, seen before the placeholder appeared or before a
+				// scroll, or already inside it: the placeholder appeared, scrolled or was dropped under the pointer and
+				// this is a wobble. The pointer has to be seen outside it first.
+				const track = pointerTrack(this.box.doc);
+				const prev = track.prev;
+				if (!prev || prev.t < this.shownAt || prev.t < track.scrolledAt) return;
 				const r = this.box.getBoundingClientRect();
-				const x = evt.clientX - evt.movementX;
-				const y = evt.clientY - evt.movementY;
-				if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return;
+				if (prev.x >= r.left && prev.x <= r.right && prev.y >= r.top && prev.y <= r.bottom) return;
 				this.movedOnto = true;
 			}
 			this.cancelHover();
 			this.hoverTimer = window.setTimeout(() => {
 				this.hoverTimer = null;
-				if (this.host.downloadMode === "hover" && this.state === "idle" && this.box.matches(":hover")) void this.start();
+				if (this.host.downloadMode === "hover" && this.state === "idle" && this.box.isShown() && this.box.matches(":hover")) {
+					void this.start();
+				}
 			}, HOVER_DELAY_MS);
 		});
 		this.box.addEventListener("mouseleave", () => {
+			this.movedOnto = false;
+			this.cancelHover();
+		});
+		pointerTrack(this.box.doc);
+		// Inserted, re-attached (reading view virtualization) or re-shown (tab switch): start over.
+		this.box.onNodeInserted(() => {
+			this.shownAt = performance.now();
 			this.movedOnto = false;
 			this.cancelHover();
 		});
@@ -164,7 +219,7 @@ export class CloudPlaceholder {
 	private hint(): string {
 		// Canvas covers cards that aren't selected, so the pointer only reaches the placeholder after selecting.
 		const card = this.containerEl.closest(".canvas-node") ? "Select the card, then " : "";
-		const action = this.host.downloadMode === "hover" ? "point at it to download." : "click to download.";
+		const action = this.host.downloadMode === "hover" ? "point at it (or click) to download." : "click to download.";
 		return card ? card + action : action.charAt(0).toUpperCase() + action.slice(1);
 	}
 
@@ -227,7 +282,7 @@ export function gateMediaEmbed(host: CloudHost, ctx: EmbedContext, file: TFile, 
  * text value) whose file is only in the cloud: Obsidian would point it at the file right away, which downloads it.
  * The element is hidden and its `src` held back until the placeholder downloads the file.
  */
-export function gateHtmlMedia(host: CloudHost, el: HTMLElement, file: TFile, src: string, resourcePath: () => string) {
+export function gateHtmlMedia(host: CloudHost, el: HTMLElement, file: TFile, src: string, resourcePath: () => string): Promise<void> {
 	const media = el.tagName === "SOURCE" ? (el.parentElement ?? el) : el;
 	// An empty src (rather than none) makes a pending <img> fire "error", so Obsidian's own image post-processor,
 	// which waits for load/error, finishes and the reading view completes its render.
@@ -247,9 +302,9 @@ export function gateHtmlMedia(host: CloudHost, el: HTMLElement, file: TFile, src
 			if (media instanceof HTMLMediaElement) media.load();
 		}
 	});
-	void placeholder.begin();
-	// The element is still detached while post-processors run; once inserted, an Export to PDF (.print) needs the file.
+	// The element is often still detached while post-processors run; once inserted, an Export to PDF needs the file.
 	holder.onNodeInserted(() => { if (holder.closest(".print")) void placeholder.start(); }, true);
+	return placeholder.begin();
 }
 
 /** Stand-in used for PDFs, whose viewer builds itself inside the container: swapped for the real embed later. */

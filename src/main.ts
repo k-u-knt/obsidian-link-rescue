@@ -5,7 +5,8 @@ import {
 } from "obsidian";
 import { around } from "monkey-around";
 import {
-	CloudEmbed, CloudHost, CloudPlaceholder, DownloadMode, EmbedCreator, formatSize, gateHtmlMedia, gateMediaEmbed,
+	CloudEmbed, CloudHost, CloudPlaceholder, DownloadMode, EmbedCreator, disposePointerTracks, formatSize, gateHtmlMedia,
+	gateMediaEmbed,
 } from "./cloudEmbed";
 import { DiagnosticsModal } from "./diagnostics";
 import { ICloud } from "./icloud";
@@ -202,6 +203,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 	onunload() {
 		this.unloaded = true;
+		disposePointerTracks();
 		this.timers.forEach((id) => window.clearTimeout(id));
 		// Don't download everything at once on disable: leave the placeholders inert until the note is reopened.
 		[...this.placeholders].forEach((p) => p.retire("Link Rescue was turned off. Reopen the note to show this file."));
@@ -355,14 +357,18 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		this.register(around(this.app as unknown as { fixFileLinks: Fix }, {
 			fixFileLinks(next: Fix): Fix {
 				return function (this: App, el: HTMLElement, sourcePath: string) {
+					const waits: Promise<void>[] = [];
 					if (!plugin.unloaded && el?.findAll) {
 						for (const media of el.findAll("img, audio, video, source, iframe")) {
 							const file = plugin.htmlMediaTarget(media, sourcePath ?? "");
 							if (!file || !plugin.icloud.isDatalessSync(file.path)) continue;
-							gateHtmlMedia(plugin, media, file, media.getAttr("src") ?? "", () => plugin.app.vault.getResourcePath(file));
+							waits.push(gateHtmlMedia(plugin, media, file, media.getAttr("src") ?? "", () => plugin.app.vault.getResourcePath(file)));
 						}
 					}
-					return next.call(this, el, sourcePath);
+					const result = next.call(this, el, sourcePath);
+					// Export to PDF waits for promises returned by post-processors: make it wait for these downloads.
+					if (waits.length && el.closest?.(".print")) return Promise.all(waits).then(() => undefined) as unknown as void;
+					return result;
 				};
 			},
 		}));
@@ -372,26 +378,42 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	htmlMediaTarget(media: HTMLElement, sourcePath: string): TFile | null {
 		const src = media.getAttr("src");
 		if (!src) return null;
-		const tag = media.tagName;
-		// Skip what the browser would take from elsewhere: <picture> with its own <source srcset>, <source> under
-		// a media element that has its own src.
-		if (tag === "IMG" && media.parentElement?.tagName === "PICTURE" && media.parentElement.querySelector("source[srcset]")) return null;
-		if (tag === "SOURCE" && media.parentElement?.hasAttribute("src")) return null;
-		const decode = (s: string) => { try { return decodeURI(s); } catch { return s; } };
-		// file:/// URLs inside the vault (Obsidian rewrites them to the file for img, audio, video, source, iframe).
+		// A <source> under a media element with its own src is never used by the browser.
+		if (media.tagName === "SOURCE" && media.parentElement?.hasAttribute("src")) return null;
+		return this.srcTarget(src, media.tagName, sourcePath);
+	}
+
+	/** Resolve an HTML src the way Obsidian does (fixFileLinks for relative paths, its app:// handler for file:///). */
+	srcTarget(src: string, tag: string, sourcePath: string): TFile | null {
 		if (src.startsWith("file:///")) {
 			const base = (this.app.vault.adapter as FileSystemAdapter).getBasePath?.();
 			if (!base) return null;
-			const abs = decode(src.slice(7)).normalize("NFC");
+			// Like Obsidian's app:// handler: cut at "?" and "#", decode the rest, resolve "." and "..".
+			let rest = src.slice(8);
+			rest = rest.split("?")[0].split("#")[0];
+			let decoded: string;
+			try { decoded = decodeURIComponent(rest); } catch { return null; }
+			const parts: string[] = [];
+			for (const seg of decoded.split("/")) {
+				if (seg === "..") parts.pop();
+				else if (seg && seg !== ".") parts.push(seg);
+			}
+			const abs = `/${parts.join("/")}`.normalize("NFC");
 			const prefix = `${base.normalize("NFC")}/`;
+			// APFS is case-insensitive.
 			if (!abs.toLowerCase().startsWith(prefix.toLowerCase())) return null;
-			const file = this.app.vault.getAbstractFileByPath(normalizePath(abs.slice(prefix.length)));
-			return file instanceof TFile ? file : null;
+			const rel = normalizePath(abs.slice(prefix.length));
+			const exact = this.app.vault.getAbstractFileByPath(rel);
+			if (exact instanceof TFile) return exact;
+			const loose = this.app.metadataCache.getFirstLinkpathDest(rel, "");
+			return loose && loose.path.toLowerCase() === rel.toLowerCase() ? loose : null;
 		}
 		if (tag === "IFRAME") return null;
 		// Obsidian's own rule: relative ("./", "../") or anything without a scheme, resolved as a whole (no #split).
 		if (!(src.startsWith("./") || src.startsWith("../") || !src.includes(":"))) return null;
-		return this.app.metadataCache.getFirstLinkpathDest(obsidianLinktext(decode(src)), sourcePath);
+		let decoded = src;
+		try { decoded = decodeURI(src); } catch { /* keep raw */ }
+		return this.app.metadataCache.getFirstLinkpathDest(obsidianLinktext(decoded), sourcePath);
 	}
 
 	get downloadMode(): DownloadMode {
@@ -524,10 +546,20 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			const f = this.app.metadataCache.getFirstLinkpathDest(obsidianLinktext(splitSubpath(ref.link).path), note.path);
 			if (f && f.extension !== "md") files.add(f);
 		}
-		// Also files held back in HTML (<img src>, <video>…) shown in this note's view.
+		// Also files held back in HTML (<img src>, <video>…): placeholders in this note's view (including reading-view
+		// sections that are off-screen and detached), and HTML srcs in the note text (Live Preview renders lazily).
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (view?.file === note) {
-			for (const p of this.pendingPlaceholders()) if (view.containerEl.contains(p.containerEl)) files.add(p.file);
+			const sections = (view as unknown as { previewMode?: { renderer?: { sections?: Array<{ el: HTMLElement }> } } })
+				.previewMode?.renderer?.sections ?? [];
+			for (const p of this.pendingPlaceholders()) {
+				if (view.containerEl.contains(p.containerEl) || sections.some((sec) => sec.el.contains(p.containerEl))) files.add(p.file);
+			}
+		}
+		const text = await this.app.vault.cachedRead(note);
+		for (const m of text.matchAll(/<(img|video|audio|source|iframe)\b[^>]*?\ssrc\s*=\s*(["'])(.*?)\2/gi)) {
+			const f = this.srcTarget(m[3], m[1].toUpperCase(), note.path);
+			if (f && f.extension !== "md") files.add(f);
 		}
 		const cloud = [...files].filter((f) => this.icloud.isDatalessSync(f.path));
 		if (!cloud.length) {
