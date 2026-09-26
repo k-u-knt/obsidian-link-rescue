@@ -58,13 +58,16 @@ export class CloudPlaceholder {
 		};
 		this.box.addEventListener("click", swallow);
 		this.box.addEventListener("mousedown", swallow);
-		// "On hover": download only when the pointer rests on this file, never just because a note was opened.
-		this.box.addEventListener("mouseenter", () => {
+		// "On hover": download only when the user moves the pointer onto this file and rests it there. Only real
+		// movement counts: the browser also reports "pointer entered" when a note opens or scrolls under a pointer
+		// that isn't moving, and opening a note must never download anything.
+		this.box.addEventListener("mousemove", (evt: MouseEvent) => {
 			if (this.host.downloadMode !== "hover" || this.state !== "idle") return;
+			if (evt.movementX === 0 && evt.movementY === 0) return;
 			this.cancelHover();
 			this.hoverTimer = window.setTimeout(() => {
 				this.hoverTimer = null;
-				if (this.host.downloadMode === "hover" && this.state === "idle" && this.box.matches(":hover")) this.start();
+				if (this.host.downloadMode === "hover" && this.state === "idle" && this.box.matches(":hover")) void this.start();
 			}, HOVER_DELAY_MS);
 		});
 		this.box.addEventListener("mouseleave", () => this.cancelHover());
@@ -144,6 +147,13 @@ export class CloudPlaceholder {
 		}
 	}
 
+	private hint(): string {
+		// Canvas covers cards that aren't selected, so the pointer only reaches the placeholder after selecting.
+		const card = this.containerEl.closest(".canvas-node") ? "Select the card, then " : "";
+		const action = this.host.downloadMode === "hover" ? "point at it to download." : "click to download.";
+		return card ? card + action : action.charAt(0).toUpperCase() + action.slice(1);
+	}
+
 	private render() {
 		const box = this.box;
 		const where = this.host.cloudName;
@@ -161,8 +171,7 @@ export class CloudPlaceholder {
 				? `Downloading from ${where} (${size})…`
 				: this.state === "failed"
 					? `Download from ${where} failed. Click to try again.`
-					: `In ${where}, not downloaded (${size}). ${this.host.downloadMode === "hover"
-						? "Point at it to download." : "Click to download."}`,
+					: `In ${where}, not downloaded (${size}). ${this.hint()}`,
 		});
 	}
 }
@@ -197,6 +206,31 @@ export function gateMediaEmbed(host: CloudHost, ctx: EmbedContext, file: TFile, 
 		real.register(() => placeholder.retire());
 		return placeholder.begin();
 	};
+}
+
+/**
+ * Gate an HTML media element (e.g. `<img src="attachments/x.png">` in a note, a Live Preview HTML block, a Bases
+ * text value) whose file is only in the cloud: Obsidian would point it at the file right away, which downloads it.
+ * The element is hidden and its `src` held back until the placeholder downloads the file.
+ */
+export function gateHtmlMedia(host: CloudHost, el: HTMLElement, file: TFile, src: string, resourcePath: () => string) {
+	const media = el.tagName === "SOURCE" ? (el.parentElement ?? el) : el;
+	el.removeAttribute("src");
+	el.setAttr("data-link-rescue-src", src);
+	media.addClass("link-rescue-hidden");
+	const holder = createSpan({ cls: "link-rescue-html-holder" });
+	media.insertAdjacentElement("beforebegin", holder);
+	const placeholder = new CloudPlaceholder(host, holder, file, async () => {
+		holder.remove();
+		media.removeClass("link-rescue-hidden");
+		el.removeAttribute("data-link-rescue-src");
+		if (el.tagName === "IMG") await setSrc(el as HTMLImageElement, resourcePath());
+		else {
+			el.setAttr("src", resourcePath());
+			if (media instanceof HTMLMediaElement) media.load();
+		}
+	});
+	void placeholder.begin();
 }
 
 /** Stand-in used for PDFs, whose viewer builds itself inside the container: swapped for the real embed later. */

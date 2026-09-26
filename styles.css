@@ -175,3 +175,13 @@
 	width: var(--touch-size-xs, 30px);
 	height: var(--touch-size-xs, 30px);
 }
+
+/* HTML <img>/<video>/<audio> whose file is still in the cloud: hidden until downloaded. */
+.link-rescue-hidden {
+	display: none !important;
+}
+
+.link-rescue-html-holder {
+	display: inline-block;
+	max-width: 100%;
+}

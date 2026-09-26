@@ -69,6 +69,12 @@ Unicode normalization form.
 | Notify about iCloud downloads (macOS) | on |
 | Show status icons | on |
 
+### Known limits of "On hover"
+
+The plugin holds back embeds (`![[…]]`, `![](…)`) and HTML `<img>`/`<video>`/`<audio>` in notes. A few places in
+Obsidian load files by other routes and can still download a cloud-only file: the image lightbox, the Live Preview
+image-edit popup, and Bases card covers. In canvas, select a card first; Obsidian covers unselected cards.
+
 ### Git users
 
 `git status` (for example from the Git plugin) re-reads files whose iCloud state changed, which downloads

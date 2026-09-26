@@ -58,8 +58,13 @@ export class ICloud {
 			const st = fs.statSync(full);
 			if (st.size === 0 || st.blocks !== 0) return false;
 			const { execFileSync } = require("child_process") as typeof import("child_process");
-			const flags = parseInt(execFileSync("/usr/bin/stat", ["-f", "%Xf", full], { encoding: "utf8", timeout: 2000 }).trim(), 16);
-			return (flags & SF_DATALESS) !== 0;
+			try {
+				const flags = parseInt(execFileSync("/usr/bin/stat", ["-f", "%Xf", full], { encoding: "utf8", timeout: 2000 }).trim(), 16);
+				return (flags & SF_DATALESS) !== 0;
+			} catch {
+				// Looks dataless but the exact check failed: assume it is, so nothing downloads by accident.
+				return true;
+			}
 		} catch {
 			return false;
 		}

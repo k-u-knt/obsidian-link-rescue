@@ -3,7 +3,9 @@ import {
 	setTooltip,
 } from "obsidian";
 import { around } from "monkey-around";
-import { CloudEmbed, CloudHost, CloudPlaceholder, DownloadMode, EmbedCreator, formatSize, gateMediaEmbed } from "./cloudEmbed";
+import {
+	CloudEmbed, CloudHost, CloudPlaceholder, DownloadMode, EmbedCreator, formatSize, gateHtmlMedia, gateMediaEmbed,
+} from "./cloudEmbed";
 import { DiagnosticsModal } from "./diagnostics";
 import { ICloud } from "./icloud";
 import { IosCloud, isHiddenPath } from "./icloudIos";
@@ -26,6 +28,8 @@ interface LinkRescueSettings {
 	/** Opening a broken link that matches a file opens that file (and repairs the link) instead of creating an empty note. */
 	safeOpen: boolean;
 }
+
+const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS: LinkRescueSettings = {
 	autoRepair: true,
@@ -82,6 +86,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	iosCloud!: IosCloud;
 	private brokenIndex: Map<string, string[]> | null = null;
 	private unloaded = false;
+	private migratedToHover = false;
 	private timers = new Set<number>();
 	private datalessCache = new Map<string, { value: boolean; at: number }>();
 	private placeholders = new Set<CloudPlaceholder>();
@@ -102,6 +107,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		this.patchOpenLinkText();
 		// Before layout-ready, so the embeds of the first notes shown go through it too.
 		this.patchEmbeds();
+		this.patchHtmlMedia();
 		if (this.icloud.available) {
 			this.statusEl = this.addStatusBarItem();
 			this.statusEl.addClass("link-rescue-status");
@@ -110,6 +116,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 		const rebuild = debounce(() => this.rebuildIndex(), 300, true);
 		this.app.workspace.onLayoutReady(() => {
+			if (this.migratedToHover) {
+				void this.saveSettings();
+				if (this.icloud.available) new Notice("Link Rescue: iCloud files now download only when you point at them, " +
+					"so opening a note no longer fills local storage. You can change this in the plugin's settings.", 12000);
+			}
 			this.rebuildIndex();
 			// Registered after layout-ready so the initial vault load doesn't fire "create" for every file.
 			this.registerEvent(this.app.vault.on("create", rebuild));
@@ -203,6 +214,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 	async loadSettings() {
 		const data = (await this.loadData()) ?? {};
+		// 0.1.x saved "auto" as its default; 0.2 protects local storage by default. Move it over once.
+		if (data.settingsVersion === undefined && data.downloadMode === "auto") {
+			data.downloadMode = "hover";
+			this.migratedToHover = true;
+		}
 		this.settings = {
 			autoRepair: data.autoRepair ?? DEFAULT_SETTINGS.autoRepair,
 			downloadMode: ["auto", "hover", "manual"].includes(data.downloadMode)
@@ -215,7 +231,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	}
 
 	async saveSettings() {
-		await this.saveData(this.settings);
+		await this.saveData({ ...this.settings, settingsVersion: SETTINGS_VERSION });
 	}
 
 	rebuildIndex() {
@@ -324,6 +340,36 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 			// Restore only if nobody has replaced our wrapper since.
 			this.register(() => { if (registry[ext] === wrapped) registry[ext] = original; });
 		}
+	}
+
+	/**
+	 * `<img>`, `<video>`, `<audio>` and `<source>` written as HTML (in notes, Live Preview HTML blocks, Bases values)
+	 * don't go through the embed registry: Obsidian's app.fixFileLinks points them at the file directly. Hold back
+	 * the ones whose file is only in the cloud, so they follow the download mode too.
+	 */
+	private patchHtmlMedia() {
+		if (!this.icloud.available) return;
+		const plugin = this;
+		type Fix = (this: App, el: HTMLElement, sourcePath: string) => void;
+		this.register(around(this.app as unknown as { fixFileLinks: Fix }, {
+			fixFileLinks(next: Fix): Fix {
+				return function (this: App, el: HTMLElement, sourcePath: string) {
+					if (!plugin.unloaded && el?.findAll) {
+						for (const media of el.findAll("img, audio, video, source")) {
+							const src = media.getAttr("src");
+							// Only relative vault paths (not URLs, data:, app://, or absolute paths).
+							if (!src || /^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("/")) continue;
+							let linktext = src;
+							try { linktext = decodeURI(src); } catch { /* keep raw */ }
+							const file = plugin.app.metadataCache.getFirstLinkpathDest(obsidianLinktext(splitSubpath(linktext).path), sourcePath ?? "");
+							if (!file || !plugin.icloud.isDatalessSync(file.path)) continue;
+							gateHtmlMedia(plugin, media, file, src, () => plugin.app.vault.getResourcePath(file));
+						}
+					}
+					return next.call(this, el, sourcePath);
+				};
+			},
+		}));
 	}
 
 	get downloadMode(): DownloadMode {
