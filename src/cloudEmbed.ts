@@ -13,11 +13,17 @@ export interface EmbedComponent extends Component {
 export type EmbedCreator = (ctx: EmbedContext, file: TFile, subpath?: string) => EmbedComponent | null;
 
 /**
- * When a file that is only in the cloud gets downloaded. Never because a note opened or scrolled into view:
- * "hover" (shown as "On hover") when the user rests the pointer on its placeholder, "manual" ("On click") only when
- * the user clicks it.
+ * When a file that is only in the cloud gets downloaded: "manual" ("On click") only when the user clicks its
+ * placeholder; "hover" ("On hover", semi-automatic) when the user rests the pointer on it; "visible" ("When visible",
+ * automatic) when the placeholder has been on screen for a moment. Never merely because a note was opened.
  */
-export type DownloadMode = "hover" | "manual";
+export type DownloadMode = "manual" | "hover" | "visible";
+
+/** How long a placeholder must stay on screen before "visible" mode downloads it (skips fast scrolling past). */
+const VISIBLE_DELAY_MS = 400;
+
+/** Placeholder boxes → their placeholder, for the window-level click handling. */
+const boxes = new WeakMap<Element, CloudPlaceholder>();
 
 /** How long the pointer must rest on a placeholder before "hover" mode downloads it (skips passing sweeps). */
 const HOVER_DELAY_MS = 350;
@@ -99,6 +105,34 @@ function pointerTrack(doc: Document): PointerTrack {
 	} catch { shifts = undefined; }
 	// Zoom (Cmd+= / Cmd+-) and window resizes move a still pointer in page coordinates without any pointer event.
 	const onResize = () => lose();
+	// Clicks on a placeholder are handled at the very top of the window (capture), before editors, Live Preview
+	// widgets or other plugins can swallow them; the download starts on release over the same placeholder.
+	const boxOf = (e: Event) => {
+		const el = e.target instanceof Element ? e.target.closest(".link-rescue-cloud-embed") : null;
+		return el ? boxes.get(el) ?? null : null;
+	};
+	let pressed: CloudPlaceholder | null = null;
+	const onDown = (e: PointerEvent) => {
+		const p = boxOf(e);
+		if (!p) return;
+		e.preventDefault();
+		e.stopPropagation();
+		pressed = e.button === 0 ? p : null;
+	};
+	const onUp = (e: PointerEvent) => {
+		const p = boxOf(e);
+		if (!p) return;
+		e.preventDefault();
+		e.stopPropagation();
+		if (e.button === 0 && pressed === p) p.activate();
+		pressed = null;
+	};
+	const onMouse = (e: MouseEvent) => {
+		if (!boxOf(e)) return;
+		e.preventDefault();
+		e.stopPropagation();
+	};
+	const mouseTypes = ["mousedown", "mouseup", "click", "dblclick", "auxclick"];
 	const track: PointerTrack = {
 		scrolledAt: 0,
 		lostAt: 0,
@@ -120,6 +154,9 @@ function pointerTrack(doc: Document): PointerTrack {
 			win?.removeEventListener("blur", lose);
 			win?.removeEventListener("focus", lose);
 			win?.removeEventListener("resize", onResize);
+			win?.removeEventListener("pointerdown", onDown, true);
+			win?.removeEventListener("pointerup", onUp, true);
+			for (const t of mouseTypes) win?.removeEventListener(t, onMouse as EventListener, true);
 		},
 	};
 	doc.addEventListener("pointermove", onMove, true);
@@ -129,6 +166,9 @@ function pointerTrack(doc: Document): PointerTrack {
 	win?.addEventListener("blur", lose);
 	win?.addEventListener("focus", lose);
 	win?.addEventListener("resize", onResize);
+	win?.addEventListener("pointerdown", onDown, true);
+	win?.addEventListener("pointerup", onUp, true);
+	for (const t of mouseTypes) win?.addEventListener(t, onMouse as EventListener, true);
 	tracks.set(doc, track);
 	return track;
 }
@@ -156,6 +196,10 @@ export class CloudPlaceholder {
 	private shownAt = 0;
 	/** Where the pointer was seen just outside before it came onto the placeholder. */
 	private entry: { x: number; y: number } | null = null;
+	/** "When visible" mode: watches whether the placeholder is on screen. */
+	private io: IntersectionObserver | null = null;
+	private inView = false;
+	private visibleTimer: number | null = null;
 
 	constructor(
 		private host: CloudHost,
@@ -165,14 +209,8 @@ export class CloudPlaceholder {
 	) {
 		containerEl.addClass("link-rescue-cloud-pending");
 		this.box = containerEl.createDiv({ cls: "link-rescue-cloud-embed" });
-		// Keep clicks away from Obsidian's own handlers (e.g. Live Preview selecting the embed's source).
-		const swallow = (evt: MouseEvent) => {
-			evt.preventDefault();
-			evt.stopPropagation();
-			if (evt.type === "click" && (this.state === "idle" || this.state === "failed")) this.start();
-		};
-		this.box.addEventListener("click", swallow);
-		this.box.addEventListener("mousedown", swallow);
+		// Clicks are handled by the window-level listeners set up in pointerTrack() (see activate()).
+		boxes.set(this.box, this);
 		// "On hover": download only when the user moves the pointer onto this file and rests it there. Only real
 		// movement counts: the browser also reports "pointer entered" when a note opens or scrolls under a pointer
 		// that isn't moving, and opening a note must never download anything.
@@ -225,8 +263,44 @@ export class CloudPlaceholder {
 			this.movedOnto = false;
 			this.entry = null;
 			this.cancelHover();
+			this.watchVisibility();
 		});
 		this.render();
+	}
+
+	/** A click (press and release) on the placeholder: download, in every mode. */
+	activate() {
+		if (this.state === "idle" || this.state === "failed") void this.start();
+	}
+
+	/** "When visible": observe the placeholder in the window it is shown in (popouts have their own). */
+	private watchVisibility() {
+		this.io?.disconnect();
+		const IO = (this.box.win as Window & typeof globalThis).IntersectionObserver;
+		if (!IO) return;
+		this.io = new IO((entries) => {
+			const e = entries[entries.length - 1];
+			this.inView = e.isIntersecting && (e.intersectionRatio >= 0.5 || e.intersectionRect.height >= 120);
+			this.onVisibility();
+		}, { threshold: [0, 0.25, 0.5, 0.75, 1] });
+		this.io.observe(this.box);
+	}
+
+	private onVisibility() {
+		if (this.visibleTimer !== null) window.clearTimeout(this.visibleTimer);
+		this.visibleTimer = null;
+		if (!this.inView || this.host.downloadMode !== "visible" || this.state !== "idle") return;
+		this.visibleTimer = window.setTimeout(() => {
+			this.visibleTimer = null;
+			if (this.inView && this.host.downloadMode === "visible" && this.state === "idle" && this.box.isShown()) void this.start();
+		}, VISIBLE_DELAY_MS);
+	}
+
+	private stopWatching() {
+		this.io?.disconnect();
+		this.io = null;
+		if (this.visibleTimer !== null) window.clearTimeout(this.visibleTimer);
+		this.visibleTimer = null;
 	}
 
 	/**
@@ -272,6 +346,8 @@ export class CloudPlaceholder {
 		this.entry = null;
 		this.cancelHover();
 		if (this.state === "idle" || this.state === "failed") this.render();
+		// Switching to "When visible" applies to placeholders already on screen.
+		this.onVisibility();
 	}
 
 	get pending(): boolean {
@@ -316,6 +392,7 @@ export class CloudPlaceholder {
 		if (this.state === "retired") return Promise.resolve();
 		if (this.revealing) return this.revealing;
 		this.state = "done";
+		this.stopWatching();
 		this.host.untrack(this);
 		this.box.remove();
 		this.containerEl.removeClass("link-rescue-cloud-pending");
@@ -327,6 +404,7 @@ export class CloudPlaceholder {
 	retire(message?: string) {
 		if (this.state === "done" || this.state === "retired") return;
 		this.cancelHover();
+		this.stopWatching();
 		this.state = "retired";
 		this.host.untrack(this);
 		if (message && this.box.isConnected) {
@@ -337,9 +415,11 @@ export class CloudPlaceholder {
 	}
 
 	private hint(): string {
+		const mode = this.host.downloadMode;
+		if (mode === "visible") return "Downloads when it's on screen.";
 		// Canvas covers cards that aren't selected, so the pointer only reaches the placeholder after selecting.
 		const card = this.containerEl.closest(".canvas-node") ? "Select the card, then " : "";
-		const action = this.host.downloadMode === "hover" ? "point at it to download." : "click to download.";
+		const action = mode === "hover" ? "point at it to download." : "click to download.";
 		return card ? card + action : action.charAt(0).toUpperCase() + action.slice(1);
 	}
 

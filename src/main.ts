@@ -100,6 +100,8 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 	private statusEl: HTMLElement | null = null;
 
 	async onload() {
+		// Enabled (or updated) while notes are already open: their embeds were rendered without us.
+		const enabledLate = this.app.workspace.layoutReady;
 		await this.loadSettings();
 		this.icloud = new ICloud(this.app);
 		this.iosCloud = new IosCloud(this.app);
@@ -119,6 +121,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 
 		const rebuild = debounce(() => this.rebuildIndex(), 300, true);
 		this.app.workspace.onLayoutReady(() => {
+			if (enabledLate) {
+				for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+					void (leaf as unknown as { rebuildView?: () => Promise<void> }).rebuildView?.();
+				}
+			}
 			if (this.migratedToHover) {
 				void this.saveSettings();
 				if (this.icloud.available) new Notice("Link Rescue: iCloud files now download only on hover (or, if you " +
@@ -176,10 +183,11 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		});
 		this.addCommand({
 			id: "toggle-auto-download",
-			name: "Switch cloud downloads between on hover and on click",
+			name: "Cycle cloud download mode (on click → on hover → when visible)",
 			checkCallback: (checking) => {
 				if (!this.icloud.available) return false;
-				if (!checking) void this.setDownloadMode(this.settings.downloadMode === "hover" ? "manual" : "hover");
+				const next: Record<DownloadMode, DownloadMode> = { manual: "hover", hover: "visible", visible: "manual" };
+				if (!checking) void this.setDownloadMode(next[this.settings.downloadMode]);
 				return true;
 			},
 		});
@@ -206,7 +214,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		disposePointerTracks();
 		this.timers.forEach((id) => window.clearTimeout(id));
 		// Don't download everything at once on disable: leave the placeholders inert until the note is reopened.
-		[...this.placeholders].forEach((p) => p.retire("Link Rescue was turned off. Reopen the note to show this file."));
+		[...this.placeholders].forEach((p) => p.retire("Link Rescue was turned off or reloaded. Reopen the note to show this file."));
 		this.placeholders.clear();
 		document.querySelectorAll(".link-rescue-badge").forEach((b) => b.remove());
 		document.querySelectorAll<HTMLElement>("[data-link-rescue]").forEach((el) => {
@@ -225,7 +233,7 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		}
 		this.settings = {
 			autoRepair: data.autoRepair ?? DEFAULT_SETTINGS.autoRepair,
-			downloadMode: ["hover", "manual"].includes(data.downloadMode)
+			downloadMode: ["manual", "hover", "visible"].includes(data.downloadMode)
 				? data.downloadMode
 				: data.autoDownload === false ? "manual" : DEFAULT_SETTINGS.downloadMode,
 			notifyDownloads: data.notifyDownloads ?? DEFAULT_SETTINGS.notifyDownloads,
@@ -492,10 +500,12 @@ export default class LinkRescuePlugin extends Plugin implements CloudHost {
 		// Placeholders already on screen show the new hint right away (switching never starts downloads).
 		this.pendingPlaceholders().forEach((p) => p.refresh());
 		const where = this.cloudName;
-		new Notice(mode === "hover"
-			? `Link Rescue: ${where} files now download on hover: rest the pointer on a placeholder. ` +
-				"Opening or scrolling a note downloads nothing."
-			: `Link Rescue: ${where} files now download on click: click a placeholder. Hovering downloads nothing.`);
+		new Notice(mode === "visible"
+			? `Link Rescue: ${where} files now download when they're on screen.`
+			: mode === "hover"
+				? `Link Rescue: ${where} files now download on hover: rest the pointer on a placeholder. ` +
+					"Scrolling past downloads nothing."
+				: `Link Rescue: ${where} files now download on click: click a placeholder. Hovering and scrolling download nothing.`);
 	}
 
 	/** In "on click" mode, say once per note how many of its files are still only in the cloud. */
@@ -1122,12 +1132,14 @@ class LinkRescueSettingTab extends PluginSettingTab {
 		if (this.plugin.icloud.available) {
 			new Setting(containerEl)
 				.setName("Download iCloud files")
-				.setDesc("For images, PDFs, audio and video that are still only in iCloud. Opening or scrolling a note never " +
-					"downloads them (protects local storage); each shows a placeholder until you download it. On hover: " +
-					"rest the pointer on the placeholder. On click: click the placeholder.")
+				.setDesc("For images, PDFs, audio and video that are still only in iCloud; each shows a placeholder until it's " +
+					"downloaded. On click (manual): only when you click it. On hover (semi-automatic): when you rest the " +
+					"pointer on it. When visible (automatic): when it has been on screen for a moment. Opening a note never " +
+					"downloads files that aren't shown.")
 				.addDropdown((d) => d
-					.addOption("hover", "On hover")
-					.addOption("manual", "On click")
+					.addOption("manual", "On click (manual)")
+					.addOption("hover", "On hover (semi-automatic)")
+					.addOption("visible", "When visible (automatic)")
 					.setValue(this.plugin.settings.downloadMode)
 					.onChange((v) => this.plugin.setDownloadMode(v as DownloadMode)));
 			// `git status` (e.g. from the Git plugin) re-reads files whose stat changed, which downloads evicted files.
