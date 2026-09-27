@@ -5,8 +5,8 @@ An [Obsidian](https://obsidian.md) plugin for two annoyances in iCloud-synced va
 1. **Links that show "could not be found" or "is not created yet" although the file exists**, because
    the link contains an invisible or lookalike character.
 2. **Files that iCloud has removed from your Mac** ("Optimize Mac Storage"). Obsidian downloads these
-   silently when it shows them. Link Rescue shows their state and lets you choose automatic or manual
-   downloads.
+   silently whenever a note shows them, filling local storage. Link Rescue shows a placeholder instead and lets
+   you choose when each file downloads: on click, on hover, or when it's on screen.
 
 **Desktop only for now.** Link repair works on any desktop platform; the iCloud features are macOS only.
 iPhone/iPad support is in progress.
@@ -59,6 +59,8 @@ Unicode normalization form.
 - **Find and repair broken links in vault**
 - **Download cloud files embedded in current note** (macOS)
 - **Cycle cloud download mode (on click → on hover → when visible)** (macOS)
+- **Record click diagnostics (60 s)**: logs what happens when you click placeholders to `click-debug.log` in the
+  plugin folder, for bug reports
 
 ## Settings
 
@@ -72,17 +74,24 @@ Unicode normalization form.
 
 ### Known limits
 
-The plugin holds back embeds (`![[…]]`, `![](…)`) and HTML `<img>`/`<video>`/`<audio>` in notes. A few places in
-Obsidian load files by other routes and can still download a cloud-only file: the image lightbox, the Live Preview
-image-edit popup, and Bases image values and card covers. In canvas, select a card first; Obsidian covers unselected cards. With a pen or when dragging, click instead of
-pointing. Moving straight from an embedded video or web page onto a placeholder may need a second small move. `file:///` links to files outside the vault aren't held back, nor are `![](file:///…)` images in Live Preview
-(reading view holds them back) or canvas group background images.
+The plugin holds back embeds (`![[…]]`, `![](…)`) and HTML `<img>`/`<video>`/`<audio>` in notes, including
+`app://` image links written by scripts such as DataviewJS views. A few places in Obsidian load files by other
+routes and can still download a cloud-only file: the image lightbox, the Live Preview image-edit popup, Bases image
+values and card covers, and canvas group background images. `file:///` links to files outside the vault, and
+`![](file:///…)` images in Live Preview (reading view holds them back), aren't held back either.
+
+- In canvas, select a card first; Obsidian covers unselected cards.
+- With a pen or when dragging, click instead of pointing. Moving straight from an embedded video or web page onto a
+  placeholder may need a second small move.
+- Themes that zoom a pressed image (Cupertino, Minimal, Things) don't zoom placeholders; downloaded images keep
+  the theme's zoom.
 
 ### Other plugins
 
 Plugins that draw images themselves bypass the placeholders and download files as they come into view. For
 example, turn off "Render images" and "Render PDF" in *Image in Editor*: Obsidian's Live Preview already shows
-images.
+images. *Image Toolkit*'s gallery navbar loads every image in a note when you click one; turn off "Display gallery
+navbar" if that matters to you.
 
 ### Git users
 
@@ -108,8 +117,9 @@ download `main.js`, `manifest.json` and `styles.css` from the latest release int
 - On macOS desktop it reads file metadata (`stat`, including `/usr/bin/stat` for the iCloud "dataless"
   flag) and reads the first byte of iCloud-only files to make iCloud download them. It sends nothing over
   the network itself. These features are disabled on other platforms.
-- It wraps Obsidian's internal embed registry and `WorkspaceLeaf.openLinkText` to do the above, and
-  restores both when disabled.
+- It wraps Obsidian's internal embed registry, `app.fixFileLinks` and `WorkspaceLeaf.openLinkText` to do the
+  above, and restores them when disabled. When enabled or updated while notes are open, it re-opens the notes that
+  show cloud-only files so their placeholders work.
 
 ## Development
 
