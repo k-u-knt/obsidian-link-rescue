@@ -196,13 +196,13 @@ export function replaceLinkTarget(original: string, oldPath: string, newPath: st
 		const region = wiki[2];
 		let pathEnd = region.indexOf("#");
 		if (pathEnd === -1) {
-			const trimmed = region.replace(/\s+$/, "");
+			const trimmed = region.trimEnd(); // not /\s+$/: that is quadratic on long runs of spaces
 			pathEnd = trimmed.endsWith("\\") ? trimmed.length - 1 : region.length;
 		}
 		const raw = region.slice(0, pathEnd);
 		if (normalizeKey(raw) !== normalizeKey(oldPath)) return null;
 		const lead = raw.match(/^\s*/)![0];
-		const trail = raw.match(/\s*$/)![0];
+		const trail = raw.slice(raw.trimEnd().length);
 		return original.slice(0, start) + lead + newPath + trail + original.slice(start + raw.length);
 	}
 	// Markdown link: the destination follows the last "](" (link text may itself contain brackets).

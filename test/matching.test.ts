@@ -171,3 +171,16 @@ test("markdown links: '%' in the new name is escaped so the link decodes back to
 test("only one leading slash is stripped, as Obsidian does", () => {
 	assert.deepEqual(new NameIndex(["p q.png", "ab/p q.png"]).find(".///p\u202Fq.png", "n.md"), []);
 });
+
+test("replaceLinkTarget stays fast on a link full of spaces", () => {
+	const spaces = " ".repeat(50_000);
+	const t0 = performance.now();
+	assert.equal(replaceLinkTarget(`[[${spaces}x]]`, "y", "z"), null);
+	assert.equal(replaceLinkTarget(`[[x${spaces}\t${spaces}x]]`, `x${spaces}\t${spaces}x`, "z"), "[[z]]");
+	assert.ok(performance.now() - t0 < 200, `took ${Math.round(performance.now() - t0)} ms`);
+});
+
+test("replaceLinkTarget keeps trailing spaces and the table-escape backslash", () => {
+	assert.equal(replaceLinkTarget("[[ my note  ]]", "my note", "my note"), "[[ my note  ]]");
+	assert.equal(replaceLinkTarget("[[my note\\ |A]]", "my note", "my note"), "[[my note\\ |A]]");
+});
