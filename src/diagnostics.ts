@@ -72,7 +72,7 @@ export class DiagnosticsModal extends Modal {
 		const isCapacitor = typeof CapacitorAdapter === "function" && this.app.vault.adapter instanceof CapacitorAdapter;
 		this.log("## Environment",
 			`- iOS app: ${Platform.isIosApp}, mobile: ${Platform.isMobile}, tablet-sized window: ${Platform.isTablet}, phone: ${Platform.isPhone}`,
-			`- user agent: \`${navigator.userAgent}\``,
+			`- desktop app: ${Platform.isDesktopApp}, macOS: ${Platform.isMacOS}, Windows: ${Platform.isWin}, Linux: ${Platform.isLinux}`,
 			`- CapacitorAdapter: ${isCapacitor}, fs.dir: \`${String(fs?.dir)}\`, iCloud vault detected: ${this.ios.available}`,
 			`- native Filesystem methods: ${headers?.find((p) => p.name === "Filesystem")?.methods.map((m) => m.name).join(", ") ?? "(unknown)"}`,
 			"");
@@ -278,10 +278,8 @@ export class DiagnosticsModal extends Modal {
 
 	/** Pick this run's report name: per device and time, never over another file or an iCloud placeholder. */
 	private async pickReportPath(): Promise<string> {
-		const ua = navigator.userAgent;
-		// iPadOS reports a Mac user agent; touch points tell them apart. Window size (Platform.isPhone) doesn't.
-		const device = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
-			? "iPad" : Platform.isMobile ? "mobile" : "desktop";
+		// Platform.isPhone goes by window size, so an iPad in a narrow split view is named "iPhone": only a file name.
+		const device = Platform.isIosApp ? (Platform.isPhone ? "iPhone" : "iPad") : Platform.isMobile ? "mobile" : "desktop";
 		const d = new Date();
 		const pad = (n: number) => String(n).padStart(2, "0");
 		const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}.${pad(d.getMinutes())}`;
